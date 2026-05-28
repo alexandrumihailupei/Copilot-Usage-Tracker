@@ -1,0 +1,13 @@
+node_modules/
+dist/
+out/
+.vscode-test/
+.test-out/
+*.vsix
+*.db
+
+# Scratch/unused files
+scratch/
+
+# Test files
+test/

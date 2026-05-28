@@ -1,0 +1,158 @@
+{
+  "name": "copilot-usage-tracker",
+  "displayName": "Copilot Usage Tracker",
+  "description": "Analyze GitHub Copilot Chat token usage, session statistics, and workflow-efficiency insights from local debug logs.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "copilotUsageTracker.openDashboard",
+        "title": "Open Copilot Usage Dashboard",
+        "category": "Copilot Usage"
+      },
+      {
+        "command": "copilotUsageTracker.refresh",
+        "title": "Refresh Copilot Usage Data",
+        "category": "Copilot Usage",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "copilotUsageTracker.addLogDirectory",
+        "title": "Add Log Directory",
+        "category": "Copilot Usage",
+        "icon": "$(add)"
+      },
+      {
+        "command": "copilotUsageTracker.clearCache",
+        "title": "Clear Cache",
+        "category": "Copilot Usage"
+      },
+      {
+        "command": "copilotUsageTracker.openRawLog",
+        "title": "Open Raw Log",
+        "category": "Copilot Usage"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "copilotUsageTracker",
+          "title": "Copilot Usage",
+          "icon": "media/icons/activity-bar.svg"
+        }
+      ]
+    },
+    "views": {
+      "copilotUsageTracker": [
+        {
+          "id": "copilotUsageTracker.sessions",
+          "name": "Sessions"
+        },
+        {
+          "id": "copilotUsageTracker.quickStats",
+          "name": "Quick Stats"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "copilotUsageTracker.refresh",
+          "when": "view == copilotUsageTracker.sessions",
+          "group": "navigation"
+        },
+        {
+          "command": "copilotUsageTracker.addLogDirectory",
+          "when": "view == copilotUsageTracker.sessions",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "copilotUsageTracker.openRawLog",
+          "when": "view == copilotUsageTracker.sessions && viewItem == session"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Copilot Usage Tracker",
+      "properties": {
+        "copilotUsageTracker.logDirectories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional directories to scan for Copilot Chat debug-logs."
+        },
+        "copilotUsageTracker.autoScanWorkspaceStorage": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically discover logs in VS Code workspaceStorage folders."
+        },
+        "copilotUsageTracker.parseSubagentLogs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Recursively parse subagent JSONL files for full token accounting."
+        },
+        "copilotUsageTracker.defaultGroupBy": {
+          "type": "string",
+          "enum": [
+            "date",
+            "workspace",
+            "model"
+          ],
+          "default": "date",
+          "description": "Default session grouping in the sidebar."
+        },
+        "copilotUsageTracker.plan": {
+          "type": "string",
+          "enum": [
+            "free",
+            "pro",
+            "pro+",
+            "business",
+            "enterprise"
+          ],
+          "default": "business",
+          "description": "Your GitHub Copilot plan (determines monthly quota for billing display)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "webpack --mode production",
+    "watch": "webpack --mode development --watch",
+    "lint": "eslint src --ext ts",
+    "test": "node ./test/run-unit-tests.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.3.8",
+    "@vscode/vsce": "^3.9.1",
+    "copy-webpack-plugin": "^12.0.2",
+    "eslint": "^8.56.0",
+    "mocha": "^10.2.0",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "sql.js": "^1.10.3"
+  }
+}

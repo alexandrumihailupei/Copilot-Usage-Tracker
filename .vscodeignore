@@ -1,0 +1,10 @@
+.vscode/**
+src/**
+test/**
+out/**
+node_modules/**
+!node_modules/sql.js/**
+.gitignore
+tsconfig.json
+webpack.config.js
+**/*.map
