@@ -15,19 +15,19 @@ A VS Code extension that analyzes GitHub Copilot Chat token usage, session stati
 
 ### Required VS Code Settings
 
-You **must** enable these two settings in your VS Code `settings.json` for the extension to access Copilot Chat debug data:
+You **must** enable these two settings in your VS Code `settings.json` for the extension to access Copilot Chat debug log files:
 
 ```jsonc
 {
-  "github.copilot.chat.agent.tracing": true,
-  "chat.agent.enabled": true
+  "github.copilot.chat.agentDebugLog.enabled": true,
+  "github.copilot.chat.agentDebugLog.fileLogging.enabled": true
 }
 ```
 
 | Setting | Purpose |
 |---------|---------|
-| `github.copilot.chat.agent.tracing` | Enables the OpenTelemetry agent traces database — the primary data source providing cached tokens, reasoning tokens, and full trace hierarchy |
-| `chat.agent.enabled` | Enables agent mode in Copilot Chat, which generates the rich JSONL debug logs and agent traces this extension reads |
+| `github.copilot.chat.agentDebugLog.enabled` | Enables the agent debug logs and the `/troubleshoot` slash command for inspecting chat sessions |
+| `github.copilot.chat.agentDebugLog.fileLogging.enabled` | Enables file logging, which writes debug events to JSONL files on disk — these are the files this extension reads |
 
 After enabling these settings, restart VS Code for them to take effect.
 
