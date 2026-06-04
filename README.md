@@ -47,13 +47,19 @@ After enabling these settings, restart VS Code for them to take effect.
    npm run package
    ```
 
-   > **Note:** `vsce package` requires a `repository` field in `package.json`. If you don't have one, add this block before running the command (the URL doesn't need to be a real repo):
+   > **Note:** `vsce package` requires a `repository` field in `package.json` or it will fail with an error. Add the block below as a top-level key (alongside `"name"`, `"version"`, etc.) — the URL doesn't need to point to a real repository:
    > ```json
-   > "repository": {
+   > {
+   >   "name": "copilot-usage-tracker",
+   >   "version": "0.1.0",
+   >   "repository": {
    >     "type": "git",
    >     "url": "https://github.com/placeholder/placeholder"
-   > },
+   >   },
+   >   ...
+   > }
    > ```
+   > This field is required by `vsce` to generate the `.vsix` package metadata. Without it, packaging will be aborted even if the code compiles fine.
 
 5. Install the generated `.vsix` file in VS Code:
    - Open the **Extensions** tab (`Ctrl+Shift+X`)
