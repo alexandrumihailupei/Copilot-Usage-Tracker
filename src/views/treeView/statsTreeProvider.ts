@@ -315,7 +315,14 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
     // isCurrentMonth: no override ? billing uses current UTC month automatically
 
     const billing = computeBillingStatus(this.db, config.plan, Date.now(), periodOverride);
-    const wf      = this.db.getWorkflowSummary();
+
+    // Resolve concrete period bounds for workflow stats (always a real range, never unbounded).
+    const wfBounds = isAllTime
+      ? { start: 0, end: 253402300800000 }
+      : isCurrentMonth
+        ? getBillingPeriodBounds()
+        : this.availableMonths[this.selectedMonthIdx];
+    const wf = this.db.getWorkflowSummary(wfBounds.start, wfBounds.end);
 
     const periodLabel = isAllTime
       ? 'All Time'

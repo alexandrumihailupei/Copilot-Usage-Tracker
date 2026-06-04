@@ -307,7 +307,7 @@ export type ExtensionMessage =
   | { type: 'overview'; data: OverviewData }
   | { type: 'sessions'; data: SessionListData }
   | { type: 'sessionDetail'; data: SessionDetailData }
-  | { type: 'billingStatus'; data: NonNullable<OverviewData['billing']> }
+  | { type: 'billingStatus'; data: NonNullable<OverviewData['billing']> & { modelStats?: ModelStats[]; workflow?: OverviewData['workflow'] } }
   | { type: 'trends'; data: TrendData }
   | { type: 'error'; message: string };
 

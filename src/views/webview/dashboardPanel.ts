@@ -8,7 +8,7 @@ import {
   SessionDetailData,
 } from '../../core/types';
 import { dateStringToEpoch } from '../../util/dateUtils';
-import { computeBillingStatus } from '../../stats/billingCalculator';
+import { computeBillingStatus, getBillingPeriodBounds } from '../../stats/billingCalculator';
 import { getConfig } from '../../config';
 
 export class DashboardPanel {
@@ -82,9 +82,21 @@ export class DashboardPanel {
           this.db, config.plan, Date.now(),
           { start: msg.periodStart, end: msg.periodEnd }
         );
+        const wf = this.db.getWorkflowSummary(msg.periodStart, msg.periodEnd);
         this.postMessage({
           type: 'billingStatus',
-          data: this.mapBilling(billing, msg.periodLabel),
+          data: {
+            ...this.mapBilling(billing, msg.periodLabel),
+            modelStats: this.db.getModelStats(msg.periodStart, msg.periodEnd),
+            workflow: {
+              toolCalls: wf.totalToolCalls,
+              subagents: wf.totalSubagents,
+              turns: wf.totalTurns,
+              errors: wf.totalErrors,
+              turnsPerMsg: wf.avgTurnsPerMessage,
+              toolsPerTurn: wf.avgToolsPerTurn,
+            },
+          },
         });
         break;
       }
@@ -126,11 +138,12 @@ export class DashboardPanel {
     const now = new Date();
     const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const periodLabel = `${MONTH_NAMES[now.getUTCMonth()]} ${now.getUTCFullYear()}`;
-    const wf = this.db.getWorkflowSummary();
+    const { start: periodStart, end: periodEnd } = getBillingPeriodBounds();
+    const wf = this.db.getWorkflowSummary(periodStart, periodEnd);
     return {
       aggregate: this.db.getAggregateStats(),
       dailyStats: this.db.getDailyStats(),
-      modelStats: this.db.getModelStats(),
+      modelStats: this.db.getModelStats(periodStart, periodEnd),
       topSessions: this.db.getTopSessions(10),
       availableMonths: this.db.getAvailableMonths(),
       billing: this.mapBilling(billing, periodLabel),
@@ -478,7 +491,11 @@ window.addEventListener('message', e => {
     case 'overview': renderOverview(msg.data); break;
     case 'sessions': renderSessions(msg.data); break;
     case 'sessionDetail': renderDetail(msg.data); break;
-    case 'billingStatus': renderBilling(msg.data); break;
+    case 'billingStatus':
+      renderBilling(msg.data);
+      if (msg.data.modelStats) { renderModelChart(msg.data.modelStats); }
+      if (msg.data.workflow)   { renderWorkflow(msg.data.workflow); }
+      break;
   }
 });
 

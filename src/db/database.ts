@@ -1043,8 +1043,14 @@ export class TrackerDatabase {
     }));
   }
 
-  getModelStats(): ModelStats[] {
-    const requests = this.queryRows('SELECT * FROM llm_requests ORDER BY timestamp ASC').map(r => mapLLMRequest(r));
+  getModelStats(startMs?: number, endMs?: number): ModelStats[] {
+    const where = (startMs !== undefined && endMs !== undefined)
+      ? 'WHERE timestamp >= ? AND timestamp < ?'
+      : '';
+    const params: SqlValue[] = (startMs !== undefined && endMs !== undefined) ? [startMs, endMs] : [];
+    const requests = this.queryRows(
+      `SELECT * FROM llm_requests ${where} ORDER BY timestamp ASC`, params
+    ).map(r => mapLLMRequest(r));
     const estimated = estimateSessionCaching(requests).requests;
     const byModel = new Map<string, ModelStats>();
     for (const req of estimated) {
@@ -1125,11 +1131,16 @@ export class TrackerDatabase {
     });
   }
 
-  getWorkflowSummary(): { totalToolCalls: number; totalSubagents: number; totalTurns: number; totalErrors: number; avgTurnsPerMessage: number; avgToolsPerTurn: number } {
+  getWorkflowSummary(startMs?: number, endMs?: number): { totalToolCalls: number; totalSubagents: number; totalTurns: number; totalErrors: number; avgTurnsPerMessage: number; avgToolsPerTurn: number } {
+    const hasPeriod = startMs !== undefined && endMs !== undefined;
+    const join  = hasPeriod ? 'JOIN sessions s ON ss.session_id = s.id' : '';
+    const where = hasPeriod ? 'WHERE s.start_time >= ? AND s.start_time < ?' : '';
+    const params: SqlValue[] = hasPeriod ? [startMs!, endMs!] : [];
     const rows = this.queryRows(
-      `SELECT SUM(tool_call_count) as total_tools, SUM(subagent_count) as total_subagents,
-       SUM(turn_count) as total_turns, SUM(error_count) as total_errors,
-       SUM(user_message_count) as total_messages FROM session_stats`
+      `SELECT SUM(ss.tool_call_count) as total_tools, SUM(ss.subagent_count) as total_subagents,
+       SUM(ss.turn_count) as total_turns, SUM(ss.error_count) as total_errors,
+       SUM(ss.user_message_count) as total_messages FROM session_stats ss ${join} ${where}`,
+      params
     );
     if (rows.length === 0) {
       return { totalToolCalls: 0, totalSubagents: 0, totalTurns: 0, totalErrors: 0, avgTurnsPerMessage: 0, avgToolsPerTurn: 0 };
