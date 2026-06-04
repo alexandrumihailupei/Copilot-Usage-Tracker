@@ -88,6 +88,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.window.showTextDocument(mainJsonl);
       }
     }),
+
+    vscode.commands.registerCommand('copilotUsageTracker.stats.prevMonth', () => {
+      quickStatsTree.navOlder();
+    }),
+    vscode.commands.registerCommand('copilotUsageTracker.stats.nextMonth', () => {
+      quickStatsTree.navNewer();
+    }),
+    vscode.commands.registerCommand('copilotUsageTracker.stats.allTime', () => {
+      quickStatsTree.navAllTime();
+    }),
+    vscode.commands.registerCommand('copilotUsageTracker.stats.currentMonth', () => {
+      quickStatsTree.navCurrentMonth();
+    }),
+    vscode.commands.registerCommand('copilotUsageTracker.stats.selectMonth', () => {
+      quickStatsTree.showMonthPicker();
+    }),
   );
 
   // Auto-sync on activation

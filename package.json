@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "local",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/local/copilot-usage-tracker"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -40,6 +44,31 @@
       {
         "command": "copilotUsageTracker.openRawLog",
         "title": "Open Raw Log",
+        "category": "Copilot Usage"
+      },
+      {
+        "command": "copilotUsageTracker.stats.prevMonth",
+        "title": "Previous Month (older)",
+        "category": "Copilot Usage"
+      },
+      {
+        "command": "copilotUsageTracker.stats.nextMonth",
+        "title": "Next Month (newer)",
+        "category": "Copilot Usage"
+      },
+      {
+        "command": "copilotUsageTracker.stats.allTime",
+        "title": "All Time Stats",
+        "category": "Copilot Usage"
+      },
+      {
+        "command": "copilotUsageTracker.stats.currentMonth",
+        "title": "Current Month Stats",
+        "category": "Copilot Usage"
+      },
+      {
+        "command": "copilotUsageTracker.stats.selectMonth",
+        "title": "Select Billing Period",
         "category": "Copilot Usage"
       }
     ],

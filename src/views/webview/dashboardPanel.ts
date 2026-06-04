@@ -76,42 +76,64 @@ export class DashboardPanel {
         }
         break;
       }
+      case 'requestBilling': {
+        const config = getConfig();
+        const billing = computeBillingStatus(
+          this.db, config.plan, Date.now(),
+          { start: msg.periodStart, end: msg.periodEnd }
+        );
+        this.postMessage({
+          type: 'billingStatus',
+          data: this.mapBilling(billing, msg.periodLabel),
+        });
+        break;
+      }
       case 'refresh':
         this.postMessage({ type: 'overview', data: this.getOverviewData() });
         break;
     }
   }
 
+  private mapBilling(billing: ReturnType<typeof computeBillingStatus>, periodLabel: string): NonNullable<OverviewData['billing']> {
+    return {
+      periodLabel,
+      isHistoricalPeriod: billing.isHistoricalPeriod,
+      plan: billing.plan,
+      daysRemaining: billing.daysRemaining,
+      notes: billing.notes,
+      current: {
+        used: billing.current.premiumRequestsUsed,
+        quota: billing.current.premiumRequestsQuota,
+        pct: billing.current.percentUsed,
+        breakdown: billing.current.costBreakdown.map(b => ({ model: b.model, requests: b.requests, cost: b.multipliedCost })),
+      },
+      new: {
+        used: billing.new.aiCreditsUsed,
+        quota: billing.new.aiCreditsQuota,
+        quotaIsPromotional: billing.new.quotaIsPromotional,
+        pct: billing.new.percentUsed,
+        costUSD: billing.new.estimatedCostUSD,
+        cachedTokensCaptured: billing.new.cachedTokensCaptured,
+        cachedTokensEstimated: billing.new.cachedTokensEstimated,
+        breakdown: billing.new.costBreakdown,
+      },
+    };
+  }
+
   private getOverviewData(): OverviewData {
     const config = getConfig();
     const billing = computeBillingStatus(this.db, config.plan);
+    const now = new Date();
+    const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const periodLabel = `${MONTH_NAMES[now.getUTCMonth()]} ${now.getUTCFullYear()}`;
     const wf = this.db.getWorkflowSummary();
     return {
       aggregate: this.db.getAggregateStats(),
       dailyStats: this.db.getDailyStats(),
       modelStats: this.db.getModelStats(),
       topSessions: this.db.getTopSessions(10),
-      billing: {
-        plan: config.plan,
-        daysRemaining: billing.daysRemaining,
-        notes: billing.notes,
-        current: {
-          used: billing.current.premiumRequestsUsed,
-          quota: billing.current.premiumRequestsQuota,
-          pct: billing.current.percentUsed,
-          breakdown: billing.current.costBreakdown.map(b => ({ model: b.model, requests: b.requests, cost: b.multipliedCost })),
-        },
-        new: {
-          used: billing.new.aiCreditsUsed,
-          quota: billing.new.aiCreditsQuota,
-          quotaIsPromotional: billing.new.quotaIsPromotional,
-          pct: billing.new.percentUsed,
-          costUSD: billing.new.estimatedCostUSD,
-          cachedTokensCaptured: billing.new.cachedTokensCaptured,
-          cachedTokensEstimated: billing.new.cachedTokensEstimated,
-          breakdown: billing.new.costBreakdown,
-        },
-      },
+      availableMonths: this.db.getAvailableMonths(),
+      billing: this.mapBilling(billing, periodLabel),
       workflow: {
         toolCalls: wf.totalToolCalls,
         subagents: wf.totalSubagents,
@@ -314,6 +336,11 @@ export class DashboardPanel {
 <div id="overview" class="tab-content active">
   <div class="loading" id="overview-loading">Loading...</div>
   <div id="overview-content" style="display:none;">
+    <div id="billing-period-row" style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+      <select id="billing-period-select" style="background:var(--card-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:0.85em;cursor:pointer;min-width:160px;">
+        <option value="">Loading\u2026</option>
+      </select>
+    </div>
     <div id="billing-section"></div>
     <h2>Workflow</h2>
     <div class="metrics" id="workflow-metrics"></div>
@@ -451,6 +478,7 @@ window.addEventListener('message', e => {
     case 'overview': renderOverview(msg.data); break;
     case 'sessions': renderSessions(msg.data); break;
     case 'sessionDetail': renderDetail(msg.data); break;
+    case 'billingStatus': renderBilling(msg.data); break;
   }
 });
 
@@ -459,6 +487,7 @@ function renderOverview(data) {
   document.getElementById('overview-loading').style.display = 'none';
   document.getElementById('overview-content').style.display = 'block';
 
+  populateBillingPeriodSelect(data.availableMonths || []);
   renderBilling(data.billing);
   renderWorkflow(data.workflow);
   renderMetrics(data.aggregate);
@@ -467,20 +496,65 @@ function renderOverview(data) {
   renderTopSessions(data.topSessions);
 }
 
+// Keyed period options map populated by populateBillingPeriodSelect.
+let _periodOptions = {};
+
+function populateBillingPeriodSelect(months) {
+  const sel = document.getElementById('billing-period-select');
+  if (!sel) { return; }
+  _periodOptions = {};
+  sel.innerHTML = '';
+  months.forEach((m, i) => {
+    const key = 'month_' + i;
+    _periodOptions[key] = m;
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = m.label;
+    if (i === 0) { opt.selected = true; }
+    sel.appendChild(opt);
+  });
+  // Add "All Time" option.
+  _periodOptions['alltime'] = { label: 'All Time', start: 0, end: 253402300800000 };
+  const optAll = document.createElement('option');
+  optAll.value = 'alltime';
+  optAll.textContent = 'All Time (total)';
+  sel.appendChild(optAll);
+
+  sel.onchange = function() {
+    const p = _periodOptions[this.value];
+    if (p) {
+      vscode.postMessage({ type: 'requestBilling', periodStart: p.start, periodEnd: p.end, periodLabel: p.label });
+    }
+  };
+}
+
 function renderBilling(b) {
   if (!b) { document.getElementById('billing-section').innerHTML = ''; return; }
 
   const pctClass = (p) => p > 80 ? 'high' : p > 50 ? 'mid' : 'low';
+  const isHistorical = !!b.isHistoricalPeriod;
 
-  let html = '<h2>Billing - ' + esc(b.plan.toUpperCase()) + ' Plan (' + b.daysRemaining + ' days left this cycle)</h2>';
+  // Header: show period label and days remaining (current month only).
+  let header = '<h2>Billing \u2014 ' + esc(b.plan.toUpperCase()) + ' Plan';
+  if (b.periodLabel) { header += ' | ' + esc(b.periodLabel); }
+  if (!isHistorical && b.daysRemaining > 0) { header += ' (' + b.daysRemaining + ' days left)'; }
+  header += '</h2>';
+
+  let html = header;
   html += '<div class="billing-grid">';
 
   // Current plan card
   html += '<div class="billing-card">';
   html += '<h3>Current (Request-based)</h3>';
-  html += '<div class="headline">' + b.current.used.toFixed(1) + ' <span style="font-size:0.5em;color:var(--muted)">/ ' + b.current.quota + ' reqs</span></div>';
-  html += '<div class="sub">' + b.current.pct + '% used this month</div>';
-  html += '<div class="progress-bar"><div class="progress-fill ' + pctClass(b.current.pct) + '" style="width:' + Math.min(b.current.pct, 100) + '%"></div></div>';
+  if (isHistorical) {
+    // Historical: show total used, no quota bar.
+    html += '<div class="headline">' + b.current.used.toFixed(1) + ' <span style="font-size:0.5em;color:var(--muted)">reqs (total)</span></div>';
+    html += '<div class="sub">Period total \u2014 quota not applicable</div>';
+  } else {
+    html += '<div class="headline">' + b.current.used.toFixed(1) + ' <span style="font-size:0.5em;color:var(--muted)">/ ' + b.current.quota + ' reqs</span></div>';
+    html += '<div class="sub">' + b.current.pct + '% used this month</div>';
+    html += '<div class="progress-bar"><div class="progress-fill ' + pctClass(b.current.pct) + '" style="width:' + Math.min(b.current.pct, 100) + '%"></div></div>';
+  }
   html += '<div class="billing-breakdown">';
   html += '<div class="row" style="font-weight:600"><span>Only your messages count</span><span>x multiplier</span></div>';
   for (const item of b.current.breakdown.slice(0, 4)) {
@@ -489,15 +563,21 @@ function renderBilling(b) {
   html += '</div></div>';
 
   // New plan card
-  const quotaLabel = b.new.quota === null ? 'n/a' : (b.new.quota + ' credits' + (b.new.quotaIsPromotional ? ' (promo)' : ''));
-  const pctLabel = b.new.pct === null ? 'quota n/a' : (b.new.pct + '% used');
-  const pctWidth = b.new.pct === null ? 0 : Math.min(b.new.pct, 100);
-  const pctCls = b.new.pct === null ? 'low' : pctClass(b.new.pct);
   html += '<div class="billing-card">';
   html += '<h3>From June 1 (Token-based)</h3>';
-  html += '<div class="headline">' + b.new.used.toFixed(1) + ' <span style="font-size:0.5em;color:var(--muted)">/ ' + esc(quotaLabel) + '</span></div>';
-  html += '<div class="sub">' + esc(pctLabel) + ' | $' + b.new.costUSD.toFixed(2) + ' USD equivalent</div>';
-  html += '<div class="progress-bar"><div class="progress-fill ' + pctCls + '" style="width:' + pctWidth + '%"></div></div>';
+  if (isHistorical) {
+    // Historical: show total credits and cost, no quota bar.
+    html += '<div class="headline">' + b.new.used.toFixed(1) + ' <span style="font-size:0.5em;color:var(--muted)">credits (total)</span></div>';
+    html += '<div class="sub">$' + b.new.costUSD.toFixed(2) + ' USD \u2014 quota not applicable</div>';
+  } else {
+    const quotaLabel = b.new.quota === null ? 'n/a' : (b.new.quota + ' credits' + (b.new.quotaIsPromotional ? ' (promo)' : ''));
+    const pctLabel = b.new.pct === null ? 'quota n/a' : (b.new.pct + '% used');
+    const pctWidth = b.new.pct === null ? 0 : Math.min(b.new.pct, 100);
+    const pctCls = b.new.pct === null ? 'low' : pctClass(b.new.pct);
+    html += '<div class="headline">' + b.new.used.toFixed(1) + ' <span style="font-size:0.5em;color:var(--muted)">/ ' + esc(quotaLabel) + '</span></div>';
+    html += '<div class="sub">' + esc(pctLabel) + ' | $' + b.new.costUSD.toFixed(2) + ' USD equivalent</div>';
+    html += '<div class="progress-bar"><div class="progress-fill ' + pctCls + '" style="width:' + pctWidth + '%"></div></div>';
+  }
   html += '<div class="billing-breakdown">';
   html += '<div class="row" style="font-weight:600"><span>ALL tokens count (incl. tools)</span><span>Credits</span></div>';
   for (const item of b.new.breakdown.slice(0, 4)) {
@@ -506,13 +586,12 @@ function renderBilling(b) {
   html += '</div></div>';
   html += '</div>';
 
-  // USD-equivalent comparison (the only mathematically valid one).
-  // Premium-request cost: estimate via plan price-per-request. For the included models
-  // a request is free; for the rest we approximate using the "per credit" rate of the
-  // dominant model if needed - but the simplest honest comparison is just to show both
-  // cost figures side by side and let the user judge.
   html += '<div class="billing-comparison">';
-  html += '<div class="note">Premium-request and AI-credit allowances use different units and cannot be compared directly. Both views describe the same underlying usage.</div>';
+  if (isHistorical) {
+    html += '<div class="note">Showing period totals. Monthly quota bars are only applicable for the current billing period.</div>';
+  } else {
+    html += '<div class="note">Premium-request and AI-credit allowances use different units and cannot be compared directly. Both views describe the same underlying usage.</div>';
+  }
   if (b.notes && b.notes.length) {
     for (const n of b.notes) {
       html += '<div class="note">[i] ' + esc(n) + '</div>';

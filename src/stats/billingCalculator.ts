@@ -285,11 +285,12 @@ export interface BillingStatus {
   billingPeriodStart: number;
   billingPeriodEnd: number;
   daysRemaining: number;
+  isHistoricalPeriod: boolean;
   plan: CopilotPlan;
   notes: string[];
 }
 
-function getBillingPeriodBounds(now = Date.now()): { start: number; end: number; daysRemaining: number } {
+export function getBillingPeriodBounds(now = Date.now()): { start: number; end: number; daysRemaining: number } {
   const d = new Date(now);
   const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
   const end   = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
@@ -304,8 +305,23 @@ function getAiCreditQuota(plan: CopilotPlan, now = Date.now()): { quota: number 
   return { quota: PLAN_AI_CREDITS_STANDARD[plan], promotional: false };
 }
 
-export function computeBillingStatus(db: TrackerDatabase, plan: CopilotPlan, now = Date.now()): BillingStatus {
-  const { start, end, daysRemaining } = getBillingPeriodBounds(now);
+export function computeBillingStatus(
+  db: TrackerDatabase,
+  plan: CopilotPlan,
+  now = Date.now(),
+  periodOverride?: { start: number; end: number }
+): BillingStatus {
+  let start: number, end: number, daysRemaining: number;
+  if (periodOverride) {
+    start = periodOverride.start;
+    end = periodOverride.end;
+    daysRemaining = 0;
+  } else {
+    const bounds = getBillingPeriodBounds(now);
+    start = bounds.start;
+    end = bounds.end;
+    daysRemaining = bounds.daysRemaining;
+  }
 
   // Per-message premium-request cost using the ACTUAL model that answered each prompt.
   const userPromptModels = db.getUserPromptModelsInPeriod(start, end);
@@ -339,7 +355,10 @@ export function computeBillingStatus(db: TrackerDatabase, plan: CopilotPlan, now
   }
 
   const premiumQuota = PLAN_PREMIUM_REQUESTS[plan];
-  const { quota: aiQuota, promotional } = getAiCreditQuota(plan, now);
+  // Suppress quotas for historical/all-time periods — they are per-month allowances.
+  const { quota: aiQuota, promotional } = periodOverride
+    ? { quota: null as null, promotional: false }
+    : getAiCreditQuota(plan, now);
 
   const notes: string[] = [];
   if (now < BILLING_CHANGE_MS) {
@@ -378,6 +397,7 @@ export function computeBillingStatus(db: TrackerDatabase, plan: CopilotPlan, now
     billingPeriodStart: start,
     billingPeriodEnd: end,
     daysRemaining,
+    isHistoricalPeriod: !!periodOverride,
     plan,
     notes,
   };

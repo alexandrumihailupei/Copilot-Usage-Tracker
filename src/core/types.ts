@@ -299,6 +299,7 @@ export type WebviewMessage =
   | { type: 'requestOverview' }
   | { type: 'requestSessions'; groupBy: string; dateFrom?: string; dateTo?: string }
   | { type: 'requestSessionDetail'; sessionId: string }
+  | { type: 'requestBilling'; periodStart: number; periodEnd: number; periodLabel: string }
   | { type: 'requestTrends'; period: 'daily' | 'weekly' | 'monthly' }
   | { type: 'refresh' };
 
@@ -306,6 +307,7 @@ export type ExtensionMessage =
   | { type: 'overview'; data: OverviewData }
   | { type: 'sessions'; data: SessionListData }
   | { type: 'sessionDetail'; data: SessionDetailData }
+  | { type: 'billingStatus'; data: NonNullable<OverviewData['billing']> }
   | { type: 'trends'; data: TrendData }
   | { type: 'error'; message: string };
 
@@ -314,7 +316,10 @@ export interface OverviewData {
   dailyStats: DailyStats[];
   modelStats: ModelStats[];
   topSessions: (SessionStats & { startTime: number })[];
+  availableMonths: { year: number; month: number; label: string; start: number; end: number }[];
   billing?: {
+    periodLabel: string;
+    isHistoricalPeriod: boolean;
     plan: string;
     daysRemaining: number;
     notes: string[];

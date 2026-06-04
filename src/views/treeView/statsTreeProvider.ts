@@ -2,14 +2,18 @@ import * as vscode from 'vscode';
 import { TrackerDatabase } from '../../db/database';
 import { SessionInfo, SessionStats } from '../../core/types';
 import { formatTokens, formatDateTime, getDateGroup, formatDuration } from '../../util/dateUtils';
-import { computeBillingStatus, getMultiplier, computeCostUSD } from '../../stats/billingCalculator';
+import { computeBillingStatus, getMultiplier, computeCostUSD, getBillingPeriodBounds } from '../../stats/billingCalculator';
 import { getConfig } from '../../config';
 
 type TreeItemData =
   | { kind: 'group'; label: string; sessions: (SessionInfo & SessionStats)[] }
   | { kind: 'session'; data: SessionInfo & SessionStats }
-  | { kind: 'stat'; label: string; value: string }
-  | { kind: 'action'; label: string; command: string };
+  | { kind: 'stat'; label: string; value: string }                              // kept for SessionTreeProvider
+  | { kind: 'section'; label: string }                                          // non-interactive section divider
+  | { kind: 'metric'; label: string; value: string; icon: string; tooltip?: string } // icon + label + grey description
+  | { kind: 'picker'; label: string; description: string; tooltip: string }    // month QuickPick trigger
+  | { kind: 'tip'; label: string }                                              // lightbulb tip row
+  | { kind: 'action'; label: string; command: string; icon?: string };         // primary action row
 
 export class SessionTreeProvider implements vscode.TreeDataProvider<TreeItemData> {
   private _onDidChangeTreeData = new vscode.EventEmitter<TreeItemData | undefined>();
@@ -93,6 +97,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeItemData
         item.iconPath = new vscode.ThemeIcon('link-external');
         return item;
       }
+      default:
+        return new vscode.TreeItem('');
     }
   }
 
@@ -177,89 +183,235 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
   private _onDidChangeTreeData = new vscode.EventEmitter<TreeItemData | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
+  /** -1 = All Time; 0..N = index into availableMonths (0 = most recent). */
+  private selectedMonthIdx = 0;
+  private availableMonths: { year: number; month: number; label: string; start: number; end: number }[] = [];
+
   constructor(private db: TrackerDatabase) {}
 
   refresh(): void {
     this._onDidChangeTreeData.fire(undefined);
   }
 
+  navOlder(): void {
+    if (this.selectedMonthIdx === -1) { return; }
+    this.selectedMonthIdx = Math.min(this.selectedMonthIdx + 1, Math.max(0, this.availableMonths.length - 1));
+    this.refresh();
+  }
+
+  navNewer(): void {
+    if (this.selectedMonthIdx > 0) { this.selectedMonthIdx--; }
+    else if (this.selectedMonthIdx === -1) { this.selectedMonthIdx = 0; }
+    this.refresh();
+  }
+
+  navAllTime(): void {
+    this.selectedMonthIdx = -1;
+    this.refresh();
+  }
+
+  navCurrentMonth(): void {
+    this.selectedMonthIdx = 0;
+    this.refresh();
+  }
+
+  async showMonthPicker(): Promise<void> {
+    const months = this.db.getAvailableMonths();
+    type QPI = vscode.QuickPickItem & { idx: number };
+    const qpItems: QPI[] = [
+      ...months.map((m, i): QPI => ({
+        label: m.label,
+        description: i === 0 ? 'current billing period' : 'historical',
+        iconPath: new vscode.ThemeIcon(i === 0 ? 'calendar' : 'history'),
+        picked: this.selectedMonthIdx === i,
+        idx: i,
+      })),
+      {
+        label: 'All Time',
+        description: 'cumulative totals across all months',
+        iconPath: new vscode.ThemeIcon('list-flat'),
+        picked: this.selectedMonthIdx === -1,
+        idx: -1,
+      },
+    ];
+    const picked = await vscode.window.showQuickPick(qpItems, {
+      title: 'Select Billing Period',
+      placeHolder: 'Choose a month to view stats for\u2026',
+      matchOnDescription: true,
+    }) as QPI | undefined;
+    if (!picked) { return; }
+    this.selectedMonthIdx = picked.idx;
+    this.refresh();
+  }
+
   getTreeItem(element: TreeItemData): vscode.TreeItem {
-    if (element.kind === 'stat') {
-      const text = element.value ? `${element.label}: ${element.value}` : element.label;
-      const item = new vscode.TreeItem(text, vscode.TreeItemCollapsibleState.None);
-      item.iconPath = element.label.startsWith('--') ? undefined : new vscode.ThemeIcon('pulse');
-      return item;
+    switch (element.kind) {
+      case 'section': {
+        const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
+        item.iconPath = new vscode.ThemeIcon('dash');
+        item.contextValue = 'quickStatsSection';
+        return item;
+      }
+      case 'metric': {
+        const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
+        item.description = element.value;
+        item.iconPath = new vscode.ThemeIcon(element.icon);
+        if (element.tooltip) { item.tooltip = element.tooltip; }
+        return item;
+      }
+      case 'picker': {
+        const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
+        item.description = element.description;
+        item.iconPath = new vscode.ThemeIcon('calendar');
+        item.tooltip = new vscode.MarkdownString(element.tooltip);
+        item.command = { command: 'copilotUsageTracker.stats.selectMonth', title: 'Select Period' };
+        item.contextValue = 'quickStatsPicker';
+        return item;
+      }
+      case 'tip': {
+        const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
+        item.iconPath = new vscode.ThemeIcon('lightbulb');
+        return item;
+      }
+      case 'action': {
+        const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
+        item.command  = { command: element.command, title: element.label };
+        item.iconPath = new vscode.ThemeIcon(element.icon ?? 'dashboard');
+        return item;
+      }
+      default: {
+        // 'stat' — kept for SessionTreeProvider children.
+        const e = element as { label: string; value: string };
+        const text = e.value ? `${e.label}: ${e.value}` : e.label;
+        const item = new vscode.TreeItem(text, vscode.TreeItemCollapsibleState.None);
+        item.iconPath = new vscode.ThemeIcon('pulse');
+        return item;
+      }
     }
-    if (element.kind === 'action') {
-      const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
-      item.command = { command: element.command, title: element.label };
-      item.iconPath = new vscode.ThemeIcon('dashboard');
-      return item;
-    }
-    return new vscode.TreeItem('');
   }
 
   getChildren(): TreeItemData[] {
     const config = getConfig();
-    const billing = computeBillingStatus(this.db, config.plan);
-    const agg = this.db.getAggregateStats();
-    const wf = this.db.getWorkflowSummary();
+    this.availableMonths = this.db.getAvailableMonths();
+
+    // Clamp index to valid range after a refresh.
+    if (this.selectedMonthIdx >= 0 && this.availableMonths.length > 0) {
+      this.selectedMonthIdx = Math.min(this.selectedMonthIdx, this.availableMonths.length - 1);
+    }
+
+    const isAllTime     = this.selectedMonthIdx === -1;
+    // Current month = index 0.  Do NOT pass periodOverride for index 0 so that
+    // computeBillingStatus uses getBillingPeriodBounds() internally and returns
+    // the correct daysRemaining and aiCreditsQuota for the live billing period.
+    const isCurrentMonth = !isAllTime && this.selectedMonthIdx === 0;
+
+    let periodOverride: { start: number; end: number } | undefined;
+    if (isAllTime) {
+      periodOverride = { start: 0, end: 253402300800000 };       // epoch 0 ? year 9999
+    } else if (!isCurrentMonth && this.availableMonths.length > 0) {
+      const m = this.availableMonths[this.selectedMonthIdx];
+      periodOverride = { start: m.start, end: m.end };
+    }
+    // isCurrentMonth: no override ? billing uses current UTC month automatically
+
+    const billing = computeBillingStatus(this.db, config.plan, Date.now(), periodOverride);
+    const wf      = this.db.getWorkflowSummary();
+
+    const periodLabel = isAllTime
+      ? 'All Time'
+      : this.availableMonths.length > 0
+        ? this.availableMonths[this.selectedMonthIdx].label
+        : new Date().toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 
     const items: TreeItemData[] = [];
 
-    // Billing header
-    items.push({ kind: 'stat', label: `-- ${config.plan.toUpperCase()} (${billing.daysRemaining}d left) --`, value: '' });
+    // ?? Period picker (single row at top — click opens QuickPick) ?????????????
+    const monthListMd = this.availableMonths.length === 0
+      ? '_No data yet_'
+      : this.availableMonths
+          .map((m, i) => `- ${m.label}${i === 0 ? '  _(current)_' : ''}`)
+          .join('\n') + '\n- All Time';
+    const pickerDesc = isAllTime
+      ? `${config.plan.toUpperCase()}  \u00b7  all months combined`
+      : isCurrentMonth
+        ? `${config.plan.toUpperCase()}  \u00b7  ${billing.daysRemaining}d remaining`
+        : `${config.plan.toUpperCase()}  \u00b7  historical`;
+    const pickerTooltip = `**Billing Period** \u2014 click to change\n\n${monthListMd}`;
+    items.push({ kind: 'picker', label: periodLabel, description: pickerDesc, tooltip: pickerTooltip });
 
-    // Current plan - one line
-    const curBar = bar(billing.current.percentUsed);
-    items.push({ kind: 'stat', label: 'Premium reqs (current)', value: `${billing.current.premiumRequestsUsed} / ${billing.current.premiumRequestsQuota} ${curBar}` });
+    // ?? BILLING section ???????????????????????????????????????????????????????
 
-    // New plan - one line
-    const quotaStr = billing.new.aiCreditsQuota === null ? 'n/a' : String(billing.new.aiCreditsQuota);
+    const premUsed  = billing.current.premiumRequestsUsed;
+    const premQuota = billing.current.premiumRequestsQuota;
+    if (isCurrentMonth) {
+      const pct = billing.current.percentUsed;
+      items.push({ kind: 'metric', label: 'Premium Requests', value: `${qFmt(premUsed)} / ${qFmt(premQuota)}  ${uBar(pct)} ${pct.toFixed(1)}%`, icon: 'graph-line' });
+    } else {
+      items.push({ kind: 'metric', label: 'Premium Requests', value: `${qFmt(premUsed)} total`, icon: 'graph-line' });
+    }
+
+    const credUsed  = billing.new.aiCreditsUsed;
+    const credQuota = billing.new.aiCreditsQuota;
     const promo = billing.new.quotaIsPromotional ? ' (promo)' : '';
-    const newBar = billing.new.percentUsed === null ? '' : bar(billing.new.percentUsed);
-    items.push({ kind: 'stat', label: 'Credits (Jun 2026)', value: `${billing.new.aiCreditsUsed.toFixed(1)} / ${quotaStr}${promo} ${newBar}` });
-    items.push({ kind: 'stat', label: '  Est. cost', value: `$${billing.new.estimatedCostUSD.toFixed(2)}` });
+    if (isCurrentMonth && credQuota !== null) {
+      const pct = billing.new.percentUsed ?? 0;
+      items.push({ kind: 'metric', label: 'AI Credits (Jun plan)', value: `${dFmt(credUsed)} / ${qFmt(credQuota)}${promo}  ${uBar(pct)} ${pct.toFixed(1)}%`, icon: 'credit-card' });
+    } else if (isCurrentMonth) {
+      items.push({ kind: 'metric', label: 'AI Credits (Jun plan)', value: `${dFmt(credUsed)} (no quota published)`, icon: 'credit-card' });
+    } else {
+      items.push({ kind: 'metric', label: 'AI Credits (Jun plan)', value: `${dFmt(credUsed)} total`, icon: 'credit-card' });
+    }
 
-    // Comparison removed: % of credit-quota and % of request-quota are not
-    // mathematically comparable (different units, different scales).
+    items.push({ kind: 'metric', label: 'Est. Cost', value: `$${billing.new.estimatedCostUSD.toFixed(2)} USD`, icon: 'symbol-numeric' });
 
-    // Workflow - compact
+    // ?? WORKFLOW section ??????????????????????????????????????????????????????
     if (wf.totalTurns > 0) {
-      items.push({ kind: 'stat', label: '-- Workflow --', value: '' });
-      items.push({ kind: 'stat', label: 'Turns/msg', value: `${wf.avgTurnsPerMessage} | Tools/turn: ${wf.avgToolsPerTurn}` });
-      items.push({ kind: 'stat', label: 'Calls', value: `${wf.totalToolCalls} tools, ${wf.totalSubagents} subagents` });
+      items.push({ kind: 'section', label: 'WORKFLOW' });
+      items.push({ kind: 'metric', label: 'Efficiency', value: `${wf.avgTurnsPerMessage} turns/msg  \u00b7  ${wf.avgToolsPerTurn} tools/turn`, icon: 'pulse' });
+      items.push({ kind: 'metric', label: 'Tool Calls', value: `${qFmt(wf.totalToolCalls)}  \u00b7  ${qFmt(wf.totalSubagents)} subagents`, icon: 'tools' });
       if (wf.totalErrors > 0) {
-        items.push({ kind: 'stat', label: 'Errors', value: `${wf.totalErrors} (${Math.round((wf.totalErrors / wf.totalToolCalls) * 100)}% rate)` });
+        const errPct = wf.totalToolCalls > 0 ? Math.round((wf.totalErrors / wf.totalToolCalls) * 100) : 0;
+        items.push({ kind: 'metric', label: 'Errors', value: `${qFmt(wf.totalErrors)} (${errPct}% rate)`, icon: 'warning' });
       }
     }
 
-    // Tips - max 2, only if actionable
-    const tips: string[] = [];
-    if (billing.new.percentUsed !== null && billing.new.percentUsed > billing.current.percentUsed * 1.5) {
-      tips.push('Tool/subagent calls are FREE now but cost in June');
-    }
-    if (wf.avgTurnsPerMessage > 8) {
-      tips.push('High turns/msg - be more specific to save tokens');
-    }
-    if (agg.totalCostUSD > 0 && agg.totalTokens > 0 && (agg.totalCostUSD * 1_000_000 / agg.totalTokens) > 5) {
-      tips.push('Heavy premium model use - try Sonnet for simple tasks');
-    }
-    if (tips.length > 0) {
-      items.push({ kind: 'stat', label: '-- Tips --', value: '' });
-      for (const tip of tips.slice(0, 2)) {
-        items.push({ kind: 'stat', label: `[!] ${tip}`, value: '' });
+    // ?? TIPS section ?????????????????????????????????????????????????????????
+    if (isCurrentMonth) {
+      const tips: string[] = [];
+      if (billing.new.percentUsed !== null && billing.new.percentUsed > billing.current.percentUsed * 1.5) {
+        tips.push('Tool/subagent calls are FREE now but cost from June 1');
+      }
+      if (wf.avgTurnsPerMessage > 8) {
+        tips.push('High turns/msg \u2014 be more specific to save tokens');
+      }
+      if (tips.length > 0) {
+        items.push({ kind: 'section', label: 'TIPS' });
+        for (const tip of tips.slice(0, 2)) {
+          items.push({ kind: 'tip', label: tip });
+        }
       }
     }
 
-    items.push({ kind: 'action', label: 'Open Dashboard', command: 'copilotUsageTracker.openDashboard' });
+    // ?? Dashboard action ??????????????????????????????????????????????????????
+    items.push({ kind: 'action', label: 'Open Dashboard', command: 'copilotUsageTracker.openDashboard', icon: 'dashboard' });
     return items;
   }
 }
 
-function bar(pct: number): string {
+/** Unicode block progress bar, 10 chars wide. */
+function uBar(pct: number): string {
   const filled = Math.min(Math.round(pct / 10), 10);
-  return '[' + '#'.repeat(filled) + '-'.repeat(10 - filled) + '] ' + pct + '%';
+  return '\u2588'.repeat(filled) + '\u2591'.repeat(10 - filled);
+}
+
+/** Format integer with thousands separators. */
+function qFmt(n: number): string {
+  return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/** Format decimal (1 dp) with thousands separators. */
+function dFmt(n: number): string {
+  return n.toFixed(1).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
 function shortModelName(model: string): string {

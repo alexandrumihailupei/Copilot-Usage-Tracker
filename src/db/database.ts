@@ -1098,6 +1098,33 @@ export class TrackerDatabase {
     }));
   }
 
+  /**
+   * Returns distinct UTC calendar months that have llm_request data, newest first.
+   * Each entry carries pre-computed epoch-ms start/end boundaries for use in period queries.
+   */
+  getAvailableMonths(): { year: number; month: number; label: string; start: number; end: number }[] {
+    const rows = this.queryRows(`
+      SELECT
+        CAST(strftime('%Y', timestamp / 1000, 'unixepoch') AS INTEGER) AS year,
+        CAST(strftime('%m', timestamp / 1000, 'unixepoch') AS INTEGER) AS month
+      FROM llm_requests
+      GROUP BY year, month
+      ORDER BY year DESC, month DESC
+    `);
+    const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    return rows.map(r => {
+      const year = r.year as number;
+      const month = r.month as number;
+      return {
+        year,
+        month,
+        label: `${MONTH_NAMES[month - 1]} ${year}`,
+        start: Date.UTC(year, month - 1, 1),
+        end: Date.UTC(year, month, 1),
+      };
+    });
+  }
+
   getWorkflowSummary(): { totalToolCalls: number; totalSubagents: number; totalTurns: number; totalErrors: number; avgTurnsPerMessage: number; avgToolsPerTurn: number } {
     const rows = this.queryRows(
       `SELECT SUM(tool_call_count) as total_tools, SUM(subagent_count) as total_subagents,
