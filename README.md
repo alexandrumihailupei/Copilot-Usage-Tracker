@@ -42,10 +42,24 @@ After enabling these settings, restart VS Code for them to take effect.
    ```bash
    npm run compile
    ```
-4. Press `F5` in VS Code to launch the Extension Development Host, or package it:
+4. Press `F5` in VS Code to launch the Extension Development Host, or package it as a `.vsix` file:
    ```bash
    npm run package
    ```
+
+   > **Note:** `vsce package` requires a `repository` field in `package.json`. If you don't have one, add this block before running the command (the URL doesn't need to be a real repo):
+   > ```json
+   > "repository": {
+   >     "type": "git",
+   >     "url": "https://github.com/placeholder/placeholder"
+   > },
+   > ```
+
+5. Install the generated `.vsix` file in VS Code:
+   - Open the **Extensions** tab (`Ctrl+Shift+X`)
+   - Click the `...` menu (top-right of the Extensions panel)
+   - Select **Install from VSIX...**
+   - Choose the generated `.vsix` file
 
 ## Usage
 
