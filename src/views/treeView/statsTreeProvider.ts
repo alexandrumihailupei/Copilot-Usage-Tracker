@@ -262,7 +262,7 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
       case 'picker': {
         const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
         item.description = element.description;
-        item.iconPath = new vscode.ThemeIcon('calendar');
+        item.iconPath = new vscode.ThemeIcon('chevron-down');
         item.tooltip = new vscode.MarkdownString(element.tooltip);
         item.command = { command: 'copilotUsageTracker.stats.selectMonth', title: 'Select Period' };
         item.contextValue = 'quickStatsPicker';
@@ -338,11 +338,12 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
       : this.availableMonths
           .map((m, i) => `- ${m.label}${i === 0 ? '  _(current)_' : ''}`)
           .join('\n') + '\n- All Time';
-    const pickerDesc = isAllTime
-      ? `${config.plan.toUpperCase()}  \u00b7  all months combined`
+    const pickerPeriodHint = isAllTime
+      ? 'all months combined'
       : isCurrentMonth
-        ? `${config.plan.toUpperCase()}  \u00b7  ${billing.daysRemaining}d remaining`
-        : `${config.plan.toUpperCase()}  \u00b7  historical`;
+        ? `${billing.daysRemaining}d remaining`
+        : 'historical';
+    const pickerDesc = `${config.plan.toUpperCase()}  \u00b7  ${pickerPeriodHint}  \u00b7  click to change \u25be`;
     const pickerTooltip = `**Billing Period** \u2014 click to change\n\n${monthListMd}`;
     items.push({ kind: 'picker', label: periodLabel, description: pickerDesc, tooltip: pickerTooltip });
 
