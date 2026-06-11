@@ -21,7 +21,7 @@ type SqlValue = string | number | null | Uint8Array;
 type SqlRow = Record<string, unknown>;
 
 const DB_FILENAME = 'copilot-usage.db';
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 export class TrackerDatabase {
   private db!: SqlJsDatabase;
@@ -173,6 +173,13 @@ export class TrackerDatabase {
       const promptCols = this.getColumnNames('prompt_export_cache');
       this.addColumnIfMissing(promptCols, 'prompt_export_cache', 'cache_write_tokens', 'INTEGER DEFAULT 0');
     }
+    if (from < 7) {
+      // Add direct_credits column: credits reported directly by the Copilot API
+      // (post-June 2026 billing change). NULL = not available (use token formula).
+      const reqCols = this.getColumnNames('llm_requests');
+      this.addColumnIfMissing(reqCols, 'llm_requests', 'direct_credits', 'REAL');
+      this.addColumnIfMissing(reqCols, 'llm_requests', 'direct_credits_source', 'TEXT');
+    }
   }
 
   private save(): void {
@@ -220,11 +227,11 @@ export class TrackerDatabase {
 
   insertLLMRequests(requests: LLMRequestRecord[]): void {
     const stmt = this.db.prepare(
-      `INSERT OR REPLACE INTO llm_requests (session_id, span_id, parent_span_id, timestamp, duration, model, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, ttft, max_tokens, status, error, is_subagent, subagent_name, user_request_preview, reasoning_tokens, response_model, trace_id, conversation_id, input_tokens_source, output_tokens_source, cached_input_tokens_source, cache_write_tokens_source, reasoning_tokens_source, prompt_export_key, cache_match_confidence, token_audit_flags)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT OR REPLACE INTO llm_requests (session_id, span_id, parent_span_id, timestamp, duration, model, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, ttft, max_tokens, status, error, is_subagent, subagent_name, user_request_preview, reasoning_tokens, response_model, trace_id, conversation_id, input_tokens_source, output_tokens_source, cached_input_tokens_source, cache_write_tokens_source, reasoning_tokens_source, prompt_export_key, cache_match_confidence, token_audit_flags, direct_credits, direct_credits_source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const r of requests) {
-      stmt.run([r.sessionId, r.spanId, r.parentSpanId ?? null, r.timestamp, r.duration, r.model, r.inputTokens, r.outputTokens, r.cachedInputTokens ?? 0, r.cacheWriteTokens ?? 0, r.ttft, r.maxTokens, r.status, r.error ?? null, r.isSubagent ? 1 : 0, r.subagentName ?? null, r.userRequestPreview ?? null, r.reasoningTokens ?? 0, r.responseModel ?? null, r.traceId ?? null, r.conversationId ?? null, r.inputTokensSource ?? 'unknown', r.outputTokensSource ?? 'unknown', r.cachedInputTokensSource ?? 'unknown', r.cacheWriteTokensSource ?? 'unknown', r.reasoningTokensSource ?? 'unknown', r.promptExportKey ?? null, r.cacheMatchConfidence ?? null, JSON.stringify(r.tokenAuditFlags ?? [])]);
+      stmt.run([r.sessionId, r.spanId, r.parentSpanId ?? null, r.timestamp, r.duration, r.model, r.inputTokens, r.outputTokens, r.cachedInputTokens ?? 0, r.cacheWriteTokens ?? 0, r.ttft, r.maxTokens, r.status, r.error ?? null, r.isSubagent ? 1 : 0, r.subagentName ?? null, r.userRequestPreview ?? null, r.reasoningTokens ?? 0, r.responseModel ?? null, r.traceId ?? null, r.conversationId ?? null, r.inputTokensSource ?? 'unknown', r.outputTokensSource ?? 'unknown', r.cachedInputTokensSource ?? 'unknown', r.cacheWriteTokensSource ?? 'unknown', r.reasoningTokensSource ?? 'unknown', r.promptExportKey ?? null, r.cacheMatchConfidence ?? null, JSON.stringify(r.tokenAuditFlags ?? []), r.directCredits ?? null, r.directCreditsSource ?? null]);
     }
     stmt.free();
     this.markDirty();
@@ -1373,6 +1380,8 @@ function mapLLMRequest(row: Record<string, unknown>): LLMRequestRecord {
     promptExportKey: (row.prompt_export_key as string) || undefined,
     cacheMatchConfidence: row.cache_match_confidence as number | undefined,
     tokenAuditFlags: parseJsonArray(row.token_audit_flags as string),
+    directCredits: row.direct_credits != null ? (row.direct_credits as number) : undefined,
+    directCreditsSource: (row.direct_credits_source as TokenDataSource) || undefined,
   };
 }
 

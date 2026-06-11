@@ -275,12 +275,20 @@ export interface BillingStatus {
   new: {
     aiCreditsUsed: number;
     aiCreditsQuota: number | null;
+    /** Base (non-promo) allowance for the plan. Same as aiCreditsQuota when no promo is active. */
+    baseAiCreditsQuota: number | null;
+    /** Extra credits granted by the promotional period (aiCreditsQuota - baseAiCreditsQuota). */
+    promoCreditsBonus: number;
     quotaIsPromotional: boolean;
     percentUsed: number | null;
+    /** Credits used beyond the base quota (drawing from the promo bonus). */
+    promoCreditsUsed: number;
     estimatedCostUSD: number;
     costBreakdown: { model: string; inputTokens: number; outputTokens: number; credits: number }[];
     cachedTokensCaptured: boolean;
     cachedTokensEstimated: boolean;
+    /** True when at least one request in the period has API-reported direct credits. */
+    directCreditsMeasured: boolean;
   };
   billingPeriodStart: number;
   billingPeriodEnd: number;
@@ -338,14 +346,23 @@ export function computeBillingStatus(
 
   // Token-based cost across ALL llm requests in period (incl. tool/subagent calls).
   // Hybrid: use measured cache values when present, estimate otherwise.
+  // Prefer API-reported direct credits when available.
   const rawRequests = db.getLLMRequestsInPeriod(start, end);
   const { requests, anyEstimated, anyMeasured } = estimateSessionCaching(rawRequests);
   const newBreakdown = new Map<string, { inputTokens: number; outputTokens: number; credits: number }>();
   let totalAiCredits = 0;
+  let directCreditsMeasured = false;
   const cachedTokensCaptured = anyMeasured;
   const cachedTokensEstimated = anyEstimated;
   for (const req of requests) {
-    const credits = computeCreditsForRequest(req.model, req);
+    let credits: number;
+    if (req.directCredits !== undefined) {
+      // Use API-reported value directly — most accurate source.
+      credits = req.directCredits;
+      directCreditsMeasured = true;
+    } else {
+      credits = computeCreditsForRequest(req.model, req);
+    }
     totalAiCredits += credits;
     const ex = newBreakdown.get(req.model) || { inputTokens: 0, outputTokens: 0, credits: 0 };
     ex.inputTokens += req.inputTokens;
@@ -360,11 +377,24 @@ export function computeBillingStatus(
     ? { quota: null as null, promotional: false }
     : getAiCreditQuota(plan, now);
 
+  // Base (non-promo) quota is always the standard allowance regardless of promo period.
+  const baseAiQuota = PLAN_AI_CREDITS_STANDARD[plan];
+  const promoBonus = (aiQuota !== null && baseAiQuota !== null && promotional)
+    ? Math.max(0, aiQuota - baseAiQuota)
+    : 0;
+  // Credits drawn beyond base quota come from the promo bonus.
+  const promoCreditsUsed = baseAiQuota !== null
+    ? Math.max(0, totalAiCredits - baseAiQuota)
+    : 0;
+
   const notes: string[] = [];
   if (now < BILLING_CHANGE_MS) {
     notes.push(`Token-based billing takes effect ${new Date(BILLING_CHANGE_MS).toUTCString().slice(0, 16)}; figures shown are projections.`);
   }
   if (promotional) { notes.push('Promotional credit allowance active (June 1 - September 1, 2026).'); }
+  if (promotional && promoBonus > 0) {
+    notes.push(`Promo bonus: ${promoBonus} extra credits/month (base ${baseAiQuota} + ${promoBonus} free promo = ${aiQuota} total).`);
+  }
   if (plan === 'business' || plan === 'enterprise') {
     notes.push('Business/Enterprise AI credits are POOLED across all licensed users; the quota shown is per-license-equivalent.');
   }
@@ -372,6 +402,7 @@ export function computeBillingStatus(
   if (!cachedTokensCaptured && !cachedTokensEstimated) { notes.push('Cached/cache-write token counts are not present in the logs; cost shown is an upper bound.'); }
   if (cachedTokensEstimated && !cachedTokensCaptured) { notes.push('Cached token values are estimated based on provider caching rules (prefix matching, TTL, min thresholds).'); }
   if (cachedTokensCaptured && cachedTokensEstimated) { notes.push('Some cached token values are measured from logs; others are estimated based on provider caching rules.'); }
+  if (directCreditsMeasured) { notes.push('Credit costs are sourced directly from the API for some requests (most accurate).'); }
 
   return {
     current: {
@@ -385,14 +416,18 @@ export function computeBillingStatus(
     new: {
       aiCreditsUsed: round1(totalAiCredits),
       aiCreditsQuota: aiQuota,
+      baseAiCreditsQuota: periodOverride ? null : baseAiQuota,
+      promoCreditsBonus: promoBonus,
       quotaIsPromotional: promotional,
       percentUsed: aiQuota && aiQuota > 0 ? round1((totalAiCredits / aiQuota) * 100) : null,
+      promoCreditsUsed: round1(promoCreditsUsed),
       estimatedCostUSD: totalAiCredits / 100,
       costBreakdown: Array.from(newBreakdown.entries())
         .map(([model, d]) => ({ model, inputTokens: d.inputTokens, outputTokens: d.outputTokens, credits: round1(d.credits) }))
         .sort((a, b) => b.credits - a.credits),
       cachedTokensCaptured,
       cachedTokensEstimated,
+      directCreditsMeasured,
     },
     billingPeriodStart: start,
     billingPeriodEnd: end,

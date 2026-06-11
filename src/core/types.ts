@@ -43,6 +43,13 @@ export interface LLMRequestEvent extends RawLogEvent {
     userRequest?: string;
     inputMessages?: string;
     error?: string;
+    // Direct credit cost fields (added by Copilot API after June 2026 billing change).
+    // copilotUsageNanoAiu: cost in nano-AI-Units (1,000,000,000 nanoAIU = 1 credit = $0.01 USD).
+    copilotUsageNanoAiu?: number;
+    // Fallback keys for future API versions.
+    credits?: number;
+    aiCredits?: number;
+    requestCredits?: number;
   };
 }
 
@@ -180,6 +187,10 @@ export interface LLMRequestRecord {
   promptExportKey?: string;
   cacheMatchConfidence?: number;
   tokenAuditFlags?: string[];
+  // Direct credits reported by the API (1 credit = $0.01 USD).
+  // When present, this supersedes the token-based cost formula for this request.
+  directCredits?: number;
+  directCreditsSource?: TokenDataSource;
 }
 
 export interface UserMessageRecord {

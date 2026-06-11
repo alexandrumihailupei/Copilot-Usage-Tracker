@@ -1,4 +1,4 @@
-import * as vscode from 'vscode';
+﻿import * as vscode from 'vscode';
 import { TrackerDatabase } from '../../db/database';
 import { SessionInfo, SessionStats } from '../../core/types';
 import { formatTokens, formatDateTime, getDateGroup, formatDuration } from '../../util/dateUtils';
@@ -256,7 +256,11 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
         const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
         item.description = element.value;
         item.iconPath = new vscode.ThemeIcon(element.icon);
-        if (element.tooltip) { item.tooltip = element.tooltip; }
+        if (element.tooltip) {
+          const md = new vscode.MarkdownString(element.tooltip);
+          md.isTrusted = false;
+          item.tooltip = md;
+        }
         return item;
       }
       case 'picker': {
@@ -280,7 +284,7 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
         return item;
       }
       default: {
-        // 'stat' � kept for SessionTreeProvider children.
+        // 'stat' � kept for SessionTreeProvider children.
         const e = element as { label: string; value: string };
         const text = e.value ? `${e.label}: ${e.value}` : e.label;
         const item = new vscode.TreeItem(text, vscode.TreeItemCollapsibleState.None);
@@ -332,7 +336,7 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
 
     const items: TreeItemData[] = [];
 
-    // ?? Period picker (single row at top � click opens QuickPick) ?????????????
+    // ?? Period picker (single row at top � click opens QuickPick) ?????????????
     const monthListMd = this.availableMonths.length === 0
       ? '_No data yet_'
       : this.availableMonths
@@ -358,19 +362,81 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
       items.push({ kind: 'metric', label: 'Premium Requests', value: `${qFmt(premUsed)} total`, icon: 'graph-line' });
     }
 
-    const credUsed  = billing.new.aiCreditsUsed;
-    const credQuota = billing.new.aiCreditsQuota;
-    const promo = billing.new.quotaIsPromotional ? ' (promo)' : '';
+    const credUsed   = billing.new.aiCreditsUsed;
+    const credQuota  = billing.new.aiCreditsQuota;
+    const baseQuota  = billing.new.baseAiCreditsQuota;
+    const promoBonus = billing.new.promoCreditsBonus;
+    const promoUsed  = billing.new.promoCreditsUsed;
+    // Actual free credits consumed — capped at the promo bonus size
+    const promoFree  = Math.min(promoUsed, promoBonus);
+    // Credits beyond the total (paid + promo) quota
+    const overQuota  = credQuota !== null ? Math.max(0, credUsed - credQuota) : 0;
+    const isPromo    = billing.new.quotaIsPromotional && promoBonus > 0 && baseQuota !== null;
+    const measured   = billing.new.directCreditsMeasured;
+
     if (isCurrentMonth && credQuota !== null) {
       const pct = billing.new.percentUsed ?? 0;
-      items.push({ kind: 'metric', label: 'AI Credits (Jun plan)', value: `${dFmt(credUsed)} / ${qFmt(credQuota)}${promo}  ${uBar(pct)} ${pct.toFixed(1)}%`, icon: 'credit-card' });
+      let credValue: string;
+
+      if (overQuota > 0) {
+        // Over total quota — progress bar is useless at >100%; show raw overage instead
+        credValue = `${dFmt(credUsed)} / ${qFmt(credQuota)}  \u26a0 +${qFmt(Math.round(overQuota))} over${measured ? '  \u2713' : ''}`;
+      } else if (isPromo && promoFree > 0) {
+        // Inside promo zone but within total quota
+        credValue = `${dFmt(credUsed)} / ${qFmt(credQuota)}  ${uBar(pct)} ${Math.round(pct)}%  (${qFmt(Math.round(promoFree))} free)${measured ? '  \u2713' : ''}`;
+      } else {
+        credValue = `${dFmt(credUsed)} / ${qFmt(credQuota)}  ${uBar(pct)} ${Math.round(pct)}%${measured ? '  \u2713' : ''}`;
+      }
+
+      // Tooltip: per-bucket breakdown, only shown when promo is active
+      let credTooltip: string | undefined;
+      if (isPromo) {
+        const paidUsed = Math.min(credUsed, baseQuota!);
+        const paidPct  = Math.min(100, Math.round((paidUsed  / baseQuota!) * 100));
+        const promoPct = Math.min(100, Math.round((promoFree / promoBonus)  * 100));
+        const promoUSD = `$${(promoBonus / 100).toFixed(2)}`;
+        const lines: string[] = [
+          `**AI Credits \u2014 ${periodLabel}**`,
+          '',
+          '**Paid** _(subscription included)_',
+          `${dFmt(paidUsed)} / ${qFmt(baseQuota!)}  ${uBar(paidPct)} ${paidPct}%`,
+          '',
+          '**Promo** _(free until Sep 1, 2026)_',
+          `${dFmt(promoFree)} / ${qFmt(promoBonus)}  ${uBar(promoPct)} ${promoPct}%  \u2192 ${promoUSD} free`,
+        ];
+        if (overQuota > 0) {
+          lines.push('', `**\u26a0 Over quota by ${qFmt(Math.round(overQuota))} credits**`, '_Billed at $0.01 / credit above the total_');
+        }
+        lines.push('', `**Total used:** ${dFmt(credUsed)} credits = $${billing.new.estimatedCostUSD.toFixed(2)}`);
+        lines.push(`**Promo saves:** ${promoUSD} free this month`);
+        if (measured) { lines.push('', '_\u2713 Costs sourced directly from Copilot API_'); }
+        credTooltip = lines.join('\n\n');
+      } else if (measured) {
+        credTooltip = '_\u2713 Costs sourced directly from Copilot API_';
+      }
+
+      items.push({ kind: 'metric', label: 'AI Credits', value: credValue, icon: 'credit-card', tooltip: credTooltip });
     } else if (isCurrentMonth) {
-      items.push({ kind: 'metric', label: 'AI Credits (Jun plan)', value: `${dFmt(credUsed)} (no quota published)`, icon: 'credit-card' });
+      items.push({ kind: 'metric', label: 'AI Credits', value: `${dFmt(credUsed)}${measured ? '  \u2713' : ''}  (no quota)`, icon: 'credit-card' });
     } else {
-      items.push({ kind: 'metric', label: 'AI Credits (Jun plan)', value: `${dFmt(credUsed)} total`, icon: 'credit-card' });
+      items.push({ kind: 'metric', label: 'AI Credits', value: `${dFmt(credUsed)} total${measured ? '  \u2713' : ''}`, icon: 'credit-card' });
     }
 
-    items.push({ kind: 'metric', label: 'Est. Cost', value: `$${billing.new.estimatedCostUSD.toFixed(2)} USD`, icon: 'symbol-numeric' });
+    // Est. Cost — show the promo-free savings inline so the user sees what's "on them"
+    const promoSavingsUSD = promoFree / 100;
+    const costStr   = `$${billing.new.estimatedCostUSD.toFixed(2)} USD`;
+    const promoNote = (isPromo && promoFree > 0)
+      ? `  (\u2212$${promoSavingsUSD.toFixed(2)} promo free)`
+      : '';
+    const costTooltip = (isPromo && promoFree > 0)
+      ? `**Estimated cost breakdown**\n\n` +
+        `**Gross:** $${billing.new.estimatedCostUSD.toFixed(2)} ` +
+        `(${dFmt(credUsed)} credits \u00d7 $0.01)\n\n` +
+        `**Promo credit:** \u2212$${promoSavingsUSD.toFixed(2)} ` +
+        `(${qFmt(promoBonus)} free credits)\n\n` +
+        `**Net extra:** $${(billing.new.estimatedCostUSD - promoSavingsUSD).toFixed(2)} above subscription`
+      : undefined;
+    items.push({ kind: 'metric', label: 'Est. Cost', value: `${costStr}${promoNote}`, icon: 'symbol-numeric', tooltip: costTooltip });
 
     // ?? WORKFLOW section ??????????????????????????????????????????????????????
     if (wf.totalTurns > 0) {

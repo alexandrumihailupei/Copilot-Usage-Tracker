@@ -145,6 +145,20 @@ function collectEvents(
         const cacheWriteTokens = e.attrs.cacheWriteTokens ?? 0;
         const hasCachedInputTokens = Object.prototype.hasOwnProperty.call(attrs, 'cachedInputTokens');
         const hasCacheWriteTokens = Object.prototype.hasOwnProperty.call(attrs, 'cacheWriteTokens');
+
+        // Check for direct credit cost reported by the API (post-June 2026 billing).
+        // copilotUsageNanoAiu is the authoritative field: 1,000,000,000 nanoAIU = 1 credit = $0.01.
+        let directCredits: number | undefined;
+        if (typeof e.attrs.copilotUsageNanoAiu === 'number' && e.attrs.copilotUsageNanoAiu >= 0) {
+          directCredits = e.attrs.copilotUsageNanoAiu / 1_000_000_000;
+        } else {
+          // Fallback to generic credit keys (future-proofing for API changes).
+          const raw = e.attrs.credits ?? e.attrs.aiCredits ?? e.attrs.requestCredits
+            ?? (attrs['gen_ai.usage.credits'] as number | undefined)
+            ?? (attrs['billing.credits'] as number | undefined);
+          directCredits = typeof raw === 'number' && raw >= 0 ? raw : undefined;
+        }
+
         llmRequests.push({
           sessionId,
           spanId: e.spanId,
@@ -172,6 +186,8 @@ function collectEvents(
           cacheWriteTokensSource: hasCacheWriteTokens ? 'jsonl' : 'missing',
           reasoningTokensSource: 'missing',
           tokenAuditFlags: hasCachedInputTokens ? [] : ['cached_tokens_missing_jsonl'],
+          directCredits,
+          directCreditsSource: directCredits !== undefined ? 'jsonl' : undefined,
         });
         break;
       }

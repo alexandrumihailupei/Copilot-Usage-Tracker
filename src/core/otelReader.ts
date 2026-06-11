@@ -197,6 +197,27 @@ export function mapOtelToParsedSession(data: OtelSessionData): ParsedSession | u
     const spanAttrs = data.attributes.get(span.span_id);
     const explicitCacheWrite = spanAttrs ? safeAttrInt(spanAttrs.get('cache_write_tokens') ?? spanAttrs.get('cache_creation_input_tokens')) : undefined;
 
+    // Check span_attributes for direct credits reported by the API.
+    // copilot_usage_nano_aiu is the OTel equivalent of the JSONL copilotUsageNanoAiu field.
+    // 1,000,000,000 nanoAIU = 1 credit = $0.01 USD.
+    let directCredits: number | undefined;
+    if (spanAttrs) {
+      const nanoAiu = safeAttrFloat(spanAttrs.get('copilot_usage_nano_aiu')
+        ?? spanAttrs.get('copilotUsageNanoAiu'));
+      if (nanoAiu !== undefined) {
+        directCredits = nanoAiu / 1_000_000_000;
+      } else {
+        // Fallback to generic credit keys.
+        const raw = safeAttrFloat(spanAttrs.get('gen_ai.usage.credits'))
+          ?? safeAttrFloat(spanAttrs.get('billing.credits'))
+          ?? safeAttrFloat(spanAttrs.get('ai_credits'))
+          ?? safeAttrFloat(spanAttrs.get('request_credits'))
+          ?? safeAttrFloat(spanAttrs.get('copilot.credits'))
+          ?? safeAttrFloat(spanAttrs.get('credits'));
+        if (raw !== undefined) { directCredits = raw; }
+      }
+    }
+
     // Derive cacheWriteTokens: for Anthropic models, uncached input tokens are written
     // to cache on each request. For other providers, there is no cache-write surcharge.
     const isAnthropic = isAnthropicModel(span.request_model ?? '');
@@ -249,6 +270,8 @@ export function mapOtelToParsedSession(data: OtelSessionData): ParsedSession | u
       cacheWriteTokensSource: cacheWriteSource,
       reasoningTokensSource: span.reasoning_tokens !== null ? 'otel' : 'missing',
       tokenAuditFlags: auditFlags,
+      directCredits,
+      directCreditsSource: directCredits !== undefined ? 'otel' : undefined,
     };
   });
 
@@ -410,4 +433,10 @@ function safeAttrInt(v: string | undefined): number | undefined {
   if (v === undefined) { return undefined; }
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+}
+
+function safeAttrFloat(v: string | undefined): number | undefined {
+  if (v === undefined) { return undefined; }
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
 }
