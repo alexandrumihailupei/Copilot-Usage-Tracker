@@ -6,6 +6,7 @@ import { computeSessionStats } from '../stats/tokenStats';
 import { getConfig } from '../config';
 import { exportAndParsePromptLogs, buildMatchIndex } from '../core/promptExportReader';
 import { exportAndReadOtelDB, mapOtelToParsedSession } from '../core/otelReader';
+import { ingestJsonlSession } from './ingest';
 
 export interface SyncResult {
   totalDiscovered: number;
@@ -24,9 +25,9 @@ let activeSync: Promise<SyncResult> | undefined;
 
 /**
  * Three-tier hybrid sync:
- *   Tier 1: OTel Agent Traces DB (primary — richest data)
- *   Tier 2: JSONL logs (fallback — historical / when OTel unavailable)
- *   Tier 3: Prompt Export (supplemental — only for JSONL sessions missing cached tokens)
+ *   Tier 1: OTel Agent Traces DB (primary ï¿½ richest data)
+ *   Tier 2: JSONL logs (fallback ï¿½ historical / when OTel unavailable)
+ *   Tier 3: Prompt Export (supplemental ï¿½ only for JSONL sessions missing cached tokens)
  */
 export async function syncAll(
   db: TrackerDatabase,
@@ -82,7 +83,7 @@ async function syncAllInternal(
             // Check if we already have this session with the same data source
             const existingSource = db.getSessionDataSource(parsed.session.id);
             if (existingSource === 'otel') {
-              // Already ingested from OTel — skip unless data changed.
+              // Already ingested from OTel ï¿½ skip unless data changed.
               // OTel DB is always re-exported fresh, so we re-ingest to get latest spans.
               db.deleteSessionData(parsed.session.id);
             }
@@ -113,7 +114,7 @@ async function syncAllInternal(
         }
       }
     } catch (err) {
-      // Non-fatal — fall through to JSONL
+      // Non-fatal ï¿½ fall through to JSONL
       console.warn('[CopilotTracker] OTel tier failed, falling back to JSONL:', err);
     }
   }
@@ -152,25 +153,7 @@ async function syncAllInternal(
         continue;
       }
 
-      if (existingMtime !== undefined) {
-        db.deleteSessionData(disc.sessionId);
-      }
-
-      db.upsertSession(parsed.session, disc.mtimeMs);
-      db.insertLLMRequests(parsed.llmRequests);
-      db.insertUserMessages(parsed.userMessages);
-      db.insertToolCalls(parsed.toolCalls);
-
-      for (const [, model] of parsed.models) {
-        db.upsertModelBilling(
-          model.id, model.name, model.vendor,
-          model.billingMultiplier, model.isPremium,
-          model.maxContextTokens, model.maxOutputTokens
-        );
-      }
-
-      const stats = computeSessionStats(parsed);
-      db.upsertSessionStats(stats);
+      ingestJsonlSession(db, disc, parsed, existingMtime !== undefined);
 
       result.jsonlSessions++;
       result.newOrUpdated++;
@@ -181,7 +164,7 @@ async function syncAllInternal(
   }
 
   // ---- Tier 3: Prompt Export enrichment (only for JSONL sessions) ----------
-  // OTel sessions already have real cached_tokens — no enrichment needed.
+  // OTel sessions already have real cached_tokens ï¿½ no enrichment needed.
   // Only enrich JSONL-sourced sessions that lack cached token data.
   try {
     progress?.report({ message: 'Enriching cached token data...' });
@@ -228,7 +211,7 @@ async function syncAllInternal(
     // Prune entries older than 30 days to keep the table bounded.
     db.prunePromptExportCache(30);
   } catch (err) {
-    // Non-fatal — we still have estimated values as fallback.
+    // Non-fatal ï¿½ we still have estimated values as fallback.
     console.warn('[CopilotTracker] Cached token enrichment failed:', err);
   }
 

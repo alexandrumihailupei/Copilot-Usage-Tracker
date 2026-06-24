@@ -21,7 +21,7 @@ type SqlValue = string | number | null | Uint8Array;
 type SqlRow = Record<string, unknown>;
 
 const DB_FILENAME = 'copilot-usage.db';
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 export class TrackerDatabase {
   private db!: SqlJsDatabase;
@@ -176,6 +176,15 @@ export class TrackerDatabase {
     if (from < 7) {
       // Add direct_credits column: credits reported directly by the Copilot API
       // (post-June 2026 billing change). NULL = not available (use token formula).
+      const reqCols = this.getColumnNames('llm_requests');
+      this.addColumnIfMissing(reqCols, 'llm_requests', 'direct_credits', 'REAL');
+      this.addColumnIfMissing(reqCols, 'llm_requests', 'direct_credits_source', 'TEXT');
+    }
+    if (from < 8) {
+      // Heal DBs created fresh at v7: the v0 init path ran SCHEMA_SQL (which was
+      // missing these columns) and returned before migrate(), so the v7 block
+      // above never ran for them. Ensure the columns exist. addColumnIfMissing
+      // is idempotent, so this is safe regardless of how the DB reached here.
       const reqCols = this.getColumnNames('llm_requests');
       this.addColumnIfMissing(reqCols, 'llm_requests', 'direct_credits', 'REAL');
       this.addColumnIfMissing(reqCols, 'llm_requests', 'direct_credits_source', 'TEXT');
@@ -666,9 +675,9 @@ export class TrackerDatabase {
 
     // -- Reasoning signals (OTel-sourced) --
     if (totalReasoningTokens > 0 && reasoningPct > 60) {
-      signals.push('Heavy reasoning: ' + reasoningPct + '% of output was thinking (' + Math.round(totalReasoningTokens / 1000) + 'K tokens, $' + reasoningCostUSD.toFixed(3) + ') — consider a non-reasoning model for routine tasks');
+      signals.push('Heavy reasoning: ' + reasoningPct + '% of output was thinking (' + Math.round(totalReasoningTokens / 1000) + 'K tokens, $' + reasoningCostUSD.toFixed(3) + ') ï¿½ consider a non-reasoning model for routine tasks');
     } else if (totalReasoningTokens > 0 && totalReasoningTokens > totalOutput * 2) {
-      signals.push('Model over-thinking: ' + Math.round(totalReasoningTokens / 1000) + 'K reasoning tokens vs ' + Math.round((totalOutput - totalReasoningTokens) / 1000) + 'K visible output — wasteful thinking ratio');
+      signals.push('Model over-thinking: ' + Math.round(totalReasoningTokens / 1000) + 'K reasoning tokens vs ' + Math.round((totalOutput - totalReasoningTokens) / 1000) + 'K visible output ï¿½ wasteful thinking ratio');
     }
 
     // -- Cache signals --
@@ -676,41 +685,41 @@ export class TrackerDatabase {
       signals.push('Cache saved $' + cacheSavingsUSD.toFixed(3) + ' this session (' + cacheHitRate + '% hit rate)');
     }
     if (totalInput > 50000 && cacheHitRate < 20 && dataConfidence === 'measured') {
-      signals.push('Low cache hit rate (' + cacheHitRate + '%) on ' + Math.round(totalInput / 1000) + 'K input — reorganize prompts for better prefix reuse');
+      signals.push('Low cache hit rate (' + cacheHitRate + '%) on ' + Math.round(totalInput / 1000) + 'K input ï¿½ reorganize prompts for better prefix reuse');
     }
 
     // -- Data quality transparency --
     if (dataConfidence === 'estimated' && totalCachedTokens > 0) {
-      signals.push('Cache data is estimated (JSONL source) — real values may differ by ±30%');
+      signals.push('Cache data is estimated (JSONL source) ï¿½ real values may differ by ï¿½30%');
     }
 
     // -- Model routing --
     if (modelMismatches > 0) {
-      signals.push(modelMismatches + ' request(s) served by a different model than requested — possible capacity constraints');
+      signals.push(modelMismatches + ' request(s) served by a different model than requested ï¿½ possible capacity constraints');
     }
 
     // -- Existing signals --
     if (inputOutputRatio > 20) {
-      signals.push('Very context-heavy (ratio ' + inputOutputRatio + ':1) — trim included files or narrow scope');
+      signals.push('Very context-heavy (ratio ' + inputOutputRatio + ':1) ï¿½ trim included files or narrow scope');
     }
     if (wastedTokens > 0 && totalTokens > 0 && (wastedTokens / totalTokens) > 0.1) {
       signals.push(Math.round((wastedTokens / totalTokens) * 100) + '% tokens wasted on errors');
     }
     if (subagentTokens > 0 && totalTokens > 0 && (subagentTokens / totalTokens) > 0.5) {
-      signals.push('Subagents consumed ' + Math.round((subagentTokens / totalTokens) * 100) + '% of tokens — review if needed');
+      signals.push('Subagents consumed ' + Math.round((subagentTokens / totalTokens) * 100) + '% of tokens ï¿½ review if needed');
     }
     if (p90Ttft > 5000) {
-      signals.push('Slow p90 TTFT (' + Math.round(p90Ttft / 1000) + 's) — large context or complex model');
+      signals.push('Slow p90 TTFT (' + Math.round(p90Ttft / 1000) + 's) ï¿½ large context or complex model');
     }
     if (errorRate > 20) {
-      signals.push('High error rate (' + errorRate + '%) — check tool call patterns');
+      signals.push('High error rate (' + errorRate + '%) ï¿½ check tool call patterns');
     }
     if (turnCount > 0 && msgCount > 0 && (turnCount / msgCount) > 10) {
-      signals.push('High turns/msg (' + Math.round(turnCount / msgCount) + ') — more specific prompts could reduce loops');
+      signals.push('High turns/msg (' + Math.round(turnCount / msgCount) + ') ï¿½ more specific prompts could reduce loops');
     }
     const dominantModel = modelBreakdown.length > 0 ? modelBreakdown[0] : null;
     if (dominantModel && (dominantModel.model.includes('opus') || dominantModel.model.includes('gpt-4o')) && tokensPerMessage < 2000 && msgCount > 3) {
-      signals.push('Simple tasks on expensive model — consider Sonnet or GPT-4.1-mini');
+      signals.push('Simple tasks on expensive model ï¿½ consider Sonnet or GPT-4.1-mini');
     }
 
     // ---- Deep Workflow Insights ----
@@ -718,19 +727,19 @@ export class TrackerDatabase {
 
     // Add insight-driven signals
     if (insights.stallSequences > 0) {
-      signals.push('Detected ' + insights.stallSequences + ' exploration stall(s) (longest: ' + insights.longestStall + ' turns) — ' + Math.round(insights.stallTokens / 1000) + 'K tokens without productive output');
+      signals.push('Detected ' + insights.stallSequences + ' exploration stall(s) (longest: ' + insights.longestStall + ' turns) ï¿½ ' + Math.round(insights.stallTokens / 1000) + 'K tokens without productive output');
     }
     if (insights.explorationPct > 75 && tools.length > 10) {
-      signals.push('Heavy exploration (' + insights.explorationPct + '% read/search) — consider providing more upfront context');
+      signals.push('Heavy exploration (' + insights.explorationPct + '% read/search) ï¿½ consider providing more upfront context');
     }
     if (insights.contextSaturationTurn > 0) {
-      signals.push('Context reached 80%+ capacity at turn ' + insights.contextSaturationTurn + ' — cost per turn is now maxed');
+      signals.push('Context reached 80%+ capacity at turn ' + insights.contextSaturationTurn + ' ï¿½ cost per turn is now maxed');
     }
     if (insights.bloatRatio > 3) {
-      signals.push('Late-half cost was ' + insights.bloatRatio + 'x first-half — context bloat made later turns expensive');
+      signals.push('Late-half cost was ' + insights.bloatRatio + 'x first-half ï¿½ context bloat made later turns expensive');
     }
     if (insights.marginalEfficiencyPct > 0 && insights.marginalEfficiencyPct < 10) {
-      signals.push('Only ' + insights.marginalEfficiencyPct + '% of spend was new work — the rest was re-billed context');
+      signals.push('Only ' + insights.marginalEfficiencyPct + '% of spend was new work ï¿½ the rest was re-billed context');
     }
 
     return {
@@ -1440,7 +1449,9 @@ CREATE TABLE IF NOT EXISTS llm_requests (
   reasoning_tokens_source TEXT DEFAULT 'unknown',
   prompt_export_key TEXT,
   cache_match_confidence REAL,
-  token_audit_flags TEXT DEFAULT '[]'
+  token_audit_flags TEXT DEFAULT '[]',
+  direct_credits REAL,
+  direct_credits_source TEXT
 );
 CREATE TABLE IF NOT EXISTS user_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

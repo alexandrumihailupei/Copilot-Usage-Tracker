@@ -141,9 +141,13 @@ function collectEvents(
         const attrs = e.attrs as Record<string, unknown>;
         const inputTokens = e.attrs.inputTokens ?? 0;
         const outputTokens = e.attrs.outputTokens ?? 0;
-        const cachedInputTokens = e.attrs.cachedInputTokens ?? 0;
+        // Copilot Chat writes cached prompt tokens as `cachedTokens`; the OTel
+        // path and older builds use `cachedInputTokens`. Accept either.
+        const cachedInputTokens = (attrs.cachedInputTokens as number | undefined)
+          ?? (attrs.cachedTokens as number | undefined) ?? 0;
         const cacheWriteTokens = e.attrs.cacheWriteTokens ?? 0;
-        const hasCachedInputTokens = Object.prototype.hasOwnProperty.call(attrs, 'cachedInputTokens');
+        const hasCachedInputTokens = Object.prototype.hasOwnProperty.call(attrs, 'cachedInputTokens')
+          || Object.prototype.hasOwnProperty.call(attrs, 'cachedTokens');
         const hasCacheWriteTokens = Object.prototype.hasOwnProperty.call(attrs, 'cacheWriteTokens');
 
         // Check for direct credit cost reported by the API (post-June 2026 billing).
