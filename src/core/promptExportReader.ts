@@ -22,7 +22,7 @@ const NO_PROMPTS_MSG = 'No chat prompts found to export.';
 
 /** Parsed prompt entry with token usage details. */
 export interface PromptUsageEntry {
-  /** Request key — requestId ?? serverRequestId ?? ourRequestId ?? synthesised */
+  /** Request key â€” requestId ?? serverRequestId ?? ourRequestId ?? synthesised */
   key: string;
   model: string;
   promptTokens: number;
@@ -82,7 +82,7 @@ export async function exportAndParsePromptLogs(): Promise<PromptUsageEntry[]> {
     const data = JSON.parse(raw);
     return parsePromptExport(data);
   } catch (err: unknown) {
-    // The command throws when there are no prompts — suppress silently.
+    // The command throws when there are no prompts â€” suppress silently.
     if (isNoPromptsError(err)) { return []; }
     console.warn('[CopilotTracker] Prompt export failed:', err);
     return [];

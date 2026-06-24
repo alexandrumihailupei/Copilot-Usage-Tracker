@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// OTel-specific types — mirrors the Copilot Agent Traces DB schema
+// OTel-specific types â€” mirrors the Copilot Agent Traces DB schema
 // ---------------------------------------------------------------------------
 
 /** Row from the `spans` table in the OTel Agent Traces DB. */

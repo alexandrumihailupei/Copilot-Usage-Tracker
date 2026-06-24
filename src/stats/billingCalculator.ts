@@ -357,7 +357,7 @@ export function computeBillingStatus(
   for (const req of requests) {
     let credits: number;
     if (req.directCredits !== undefined) {
-      // Use API-reported value directly — most accurate source.
+      // Use API-reported value directly â€” most accurate source.
       credits = req.directCredits;
       directCreditsMeasured = true;
     } else {
@@ -372,7 +372,7 @@ export function computeBillingStatus(
   }
 
   const premiumQuota = PLAN_PREMIUM_REQUESTS[plan];
-  // Suppress quotas for historical/all-time periods — they are per-month allowances.
+  // Suppress quotas for historical/all-time periods â€” they are per-month allowances.
   const { quota: aiQuota, promotional } = periodOverride
     ? { quota: null as null, promotional: false }
     : getAiCreditQuota(plan, now);

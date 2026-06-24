@@ -1,0 +1,12 @@
+# Prevents the Windows-1252 mojibake that corrupted em-dashes (—), ± and ×
+# in source files: editors must read and write these files as UTF-8.
+root = true
+
+[*]
+charset = utf-8
+trim_trailing_whitespace = false
+insert_final_newline = true
+
+[*.{ts,js,json}]
+indent_style = space
+indent_size = 2

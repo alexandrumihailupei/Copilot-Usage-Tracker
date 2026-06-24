@@ -25,9 +25,9 @@ let activeSync: Promise<SyncResult> | undefined;
 
 /**
  * Three-tier hybrid sync:
- *   Tier 1: OTel Agent Traces DB (primary � richest data)
- *   Tier 2: JSONL logs (fallback � historical / when OTel unavailable)
- *   Tier 3: Prompt Export (supplemental � only for JSONL sessions missing cached tokens)
+ *   Tier 1: OTel Agent Traces DB (primary — richest data)
+ *   Tier 2: JSONL logs (fallback — historical / when OTel unavailable)
+ *   Tier 3: Prompt Export (supplemental — only for JSONL sessions missing cached tokens)
  */
 export async function syncAll(
   db: TrackerDatabase,
@@ -83,7 +83,7 @@ async function syncAllInternal(
             // Check if we already have this session with the same data source
             const existingSource = db.getSessionDataSource(parsed.session.id);
             if (existingSource === 'otel') {
-              // Already ingested from OTel � skip unless data changed.
+              // Already ingested from OTel — skip unless data changed.
               // OTel DB is always re-exported fresh, so we re-ingest to get latest spans.
               db.deleteSessionData(parsed.session.id);
             }
@@ -114,7 +114,7 @@ async function syncAllInternal(
         }
       }
     } catch (err) {
-      // Non-fatal � fall through to JSONL
+      // Non-fatal — fall through to JSONL
       console.warn('[CopilotTracker] OTel tier failed, falling back to JSONL:', err);
     }
   }
@@ -164,7 +164,7 @@ async function syncAllInternal(
   }
 
   // ---- Tier 3: Prompt Export enrichment (only for JSONL sessions) ----------
-  // OTel sessions already have real cached_tokens � no enrichment needed.
+  // OTel sessions already have real cached_tokens — no enrichment needed.
   // Only enrich JSONL-sourced sessions that lack cached token data.
   try {
     progress?.report({ message: 'Enriching cached token data...' });
@@ -211,7 +211,7 @@ async function syncAllInternal(
     // Prune entries older than 30 days to keep the table bounded.
     db.prunePromptExportCache(30);
   } catch (err) {
-    // Non-fatal � we still have estimated values as fallback.
+    // Non-fatal — we still have estimated values as fallback.
     console.warn('[CopilotTracker] Cached token enrichment failed:', err);
   }
 

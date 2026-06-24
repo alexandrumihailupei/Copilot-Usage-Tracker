@@ -19,7 +19,7 @@ export function computeSessionStats(parsed: ParsedSession): SessionStats {
   const totalReasoningTokens = llmRequests.reduce((sum, r) => sum + (r.reasoningTokens || 0), 0);
   const totalCacheWriteTokens = llmRequests.reduce((sum, r) => sum + (r.cacheWriteTokens || 0), 0);
 
-  // OTel sessions have real cached tokens — skip estimation.
+  // OTel sessions have real cached tokens â€” skip estimation.
   // JSONL sessions use the heuristic estimator.
   let costRequests: typeof llmRequests;
   let totalCachedTokens: number;

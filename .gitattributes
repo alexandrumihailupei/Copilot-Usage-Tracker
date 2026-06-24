@@ -1,0 +1,9 @@
+# Let Git normalize line endings; binary files are auto-detected.
+* text=auto
+
+# Source and config are UTF-8 text, stored with LF in the repository.
+*.ts   text
+*.js   text
+*.json text
+*.md   text
+*.svg  text

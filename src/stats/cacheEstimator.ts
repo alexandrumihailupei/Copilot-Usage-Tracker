@@ -11,25 +11,25 @@ import { resolveModel } from './billingCalculator';
 // Provider mechanics (from official docs, fetched May 2026):
 //
 //   Anthropic (Claude):
-//     – Automatic prefix caching, 5-min TTL (refreshed on hit)
-//     – cache_read at 0.1× base input price; cache_write at 1.25× base
-//     – Min cacheable tokens: 1024 (Sonnet 4/4.5, Opus 4/4.1),
+//     â€“ Automatic prefix caching, 5-min TTL (refreshed on hit)
+//     â€“ cache_read at 0.1Ã— base input price; cache_write at 1.25Ã— base
+//     â€“ Min cacheable tokens: 1024 (Sonnet 4/4.5, Opus 4/4.1),
 //       2048 (Sonnet 4.6, Haiku 3.5), 4096 (Opus 4.5-4.7, Haiku 4.5)
-//     – In multi-turn: previous turns' content is cache_read, new delta is cache_write
-//     – 20-block lookback window
+//     â€“ In multi-turn: previous turns' content is cache_read, new delta is cache_write
+//     â€“ 20-block lookback window
 //
 //   OpenAI (GPT):
-//     – Automatic prefix caching, minimum 1024 tokens
-//     – TTL: 5-10 min idle (in-memory), up to 24h (extended, gpt-4.1+)
-//     – Cached tokens billed at 50% of input price (cachedInput in MODEL_TABLE)
-//     – No separate cache-write surcharge
-//     – Exact prefix matching
+//     â€“ Automatic prefix caching, minimum 1024 tokens
+//     â€“ TTL: 5-10 min idle (in-memory), up to 24h (extended, gpt-4.1+)
+//     â€“ Cached tokens billed at 50% of input price (cachedInput in MODEL_TABLE)
+//     â€“ No separate cache-write surcharge
+//     â€“ Exact prefix matching
 //
 //   Google (Gemini):
-//     – Implicit caching auto-enabled for 2.5+
-//     – Min tokens: 1024 (Flash), 4096 (Pro)
-//     – Cost savings passed through automatically
-//     – Similar prefix-matching semantics
+//     â€“ Implicit caching auto-enabled for 2.5+
+//     â€“ Min tokens: 1024 (Flash), 4096 (Pro)
+//     â€“ Cost savings passed through automatically
+//     â€“ Similar prefix-matching semantics
 //
 // Estimation algorithm:
 //   Within a session, requests to the SAME model are grouped chronologically.
@@ -38,9 +38,9 @@ import { resolveModel } from './billingCalculator';
 //     2. If input tokens are below the model's min cacheable threshold, no cache hit.
 //     3. The estimated cached portion = overlap between consecutive prefixes,
 //        approximated as min(prevInputTokens, currInputTokens) because multi-turn
-//        conversations grow monotonically — each request re-sends the full prior
+//        conversations grow monotonically â€” each request re-sends the full prior
 //        context plus new content. The new delta = curr - cached.
-//     4. Subagent requests get their own cache scope (fresh context) — they don't
+//     4. Subagent requests get their own cache scope (fresh context) â€” they don't
 //        carry over from the parent's conversation.
 //
 // The first request in every group is always a cache miss (cache_write for the
@@ -64,8 +64,8 @@ const MIN_CACHEABLE_TOKENS: Record<string, number> = {
   'claude-sonnet-4':      1024,
   'claude-haiku-4.5':     4096,
   'claude-haiku-3.5':     2048,
-  // OpenAI — all 1024
-  // Google — Flash 1024, Pro 4096
+  // OpenAI â€” all 1024
+  // Google â€” Flash 1024, Pro 4096
   'gemini-2.5-pro':       4096,
   'gemini-3.1-pro':       4096,
   'gemini-3-flash':       1024,
@@ -219,7 +219,7 @@ function isMeasuredSource(source: TokenDataSource | undefined): boolean {
  *
  * Requests are grouped by sessionId so that cache scopes never bleed across
  * sessions (provider caches are per-connection / per-conversation, not global).
- * Within each session, requests are further scoped by resolvedModel × subagent.
+ * Within each session, requests are further scoped by resolvedModel Ã— subagent.
  *
  * Returns a new array of records with cachedInputTokens / cacheWriteTokens populated.
  * Records that already have measured values are returned unchanged.

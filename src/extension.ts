@@ -8,7 +8,7 @@ import { DashboardPanel } from './views/webview/dashboardPanel';
 let db: TrackerDatabase | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  // Resolve WASM path — try dist/ first (webpack-copied), fall back to node_modules
+  // Resolve WASM path â€” try dist/ first (webpack-copied), fall back to node_modules
   let wasmPath = path.join(context.extensionPath, 'dist', 'sql-wasm.wasm');
   if (!require('fs').existsSync(wasmPath)) {
     wasmPath = path.join(context.extensionPath, 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');

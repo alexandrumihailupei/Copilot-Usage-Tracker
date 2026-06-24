@@ -2,7 +2,7 @@
 // Core types for Copilot Usage Tracker
 // ---------------------------------------------------------------------------
 
-/** Raw JSONL event � every line in main.jsonl has at least these fields */
+/** Raw JSONL event — every line in main.jsonl has at least these fields */
 export interface RawLogEvent {
   v?: number;
   ts: number;
@@ -368,7 +368,7 @@ export interface SessionDetailData {
 
 export interface SessionAnalytics {
   // Token efficiency
-  inputOutputRatio: number;       // input / output � high = context heavy
+  inputOutputRatio: number;       // input / output — high = context heavy
   tokensPerMessage: number;       // total tokens / user messages
   wastedTokens: number;           // tokens burned on failed requests
   wastedPct: number;              // % of total tokens wasted
@@ -407,7 +407,7 @@ export interface SessionAnalytics {
 
   // Reasoning analysis (OTel-sourced)
   totalReasoningTokens: number;   // total reasoning/thinking tokens across all requests
-  reasoningPct: number;           // reasoning / output tokens * 100 � how much was "thinking"
+  reasoningPct: number;           // reasoning / output tokens * 100 — how much was "thinking"
   reasoningCostUSD: number;       // portion of output cost attributable to reasoning
 
   // Cache analysis

@@ -1172,7 +1172,7 @@ function renderDetail(data) {
   parts.push('<dt>Subagent Tokens</dt><dd>Tokens consumed by delegated sub-agents. Counted against the new (Jun 2026) billing model.</dd>');
   parts.push('<dt>Reasoning Tokens</dt><dd>Tokens the model used for internal "thinking" (chain-of-thought). Already included in output token count and billed at output rate. High reasoning relative to visible output means the model is over-thinking. Only available from OTel data source.</dd>');
   parts.push('<dt>Cache Hit Rate</dt><dd>Percentage of input tokens served from cache. Cache hits are billed at a much lower rate (typically 10% of input). Higher is better. "~est" means the value is estimated from heuristics, not measured.</dd>');
-  parts.push('<dt>Cache Savings</dt><dd>Dollar amount saved by cache hits vs paying full input price. Calculated as cached_tokens × (input_price - cached_price) per model.</dd>');
+  parts.push('<dt>Cache Savings</dt><dd>Dollar amount saved by cache hits vs paying full input price. Calculated as cached_tokens Ã— (input_price - cached_price) per model.</dd>');
   parts.push('<dt>Data Source Badge</dt><dd>OTel = high-fidelity data from VS Code agent traces (real cached/reasoning tokens). JSONL = parsed from debug logs (estimated cache values). Hybrid = combined from both sources.</dd>');
   parts.push('<dt>Model Routing (?)</dt><dd>When the response model differs from the requested model, shown as "requested ? actual" in the timeline. Usually indicates capacity constraints or automatic fallback.</dd>');
   parts.push('<dt>Verdict (Per-Message Table)</dt><dd>Efficient = at most 3 turns and at least 50% productive. Wasteful = more than 15 turns OR less than 30% productive turns. Normal = anything in between.</dd>');

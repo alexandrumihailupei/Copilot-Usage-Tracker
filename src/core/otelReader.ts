@@ -4,7 +4,7 @@
 // Primary data source (Tier 1). Exports and reads the SQLite database that
 // the Copilot extension maintains internally with OpenTelemetry spans.
 // Contains cached_tokens, reasoning_tokens, trace hierarchy, turn indexes,
-// and session metadata (repository, branch) — richer than the JSONL logs.
+// and session metadata (repository, branch) â€” richer than the JSONL logs.
 // ---------------------------------------------------------------------------
 
 import * as vscode from 'vscode';

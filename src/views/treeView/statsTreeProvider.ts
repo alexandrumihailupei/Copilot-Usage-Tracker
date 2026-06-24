@@ -284,7 +284,7 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
         return item;
       }
       default: {
-        // 'stat' � kept for SessionTreeProvider children.
+        // 'stat' — kept for SessionTreeProvider children.
         const e = element as { label: string; value: string };
         const text = e.value ? `${e.label}: ${e.value}` : e.label;
         const item = new vscode.TreeItem(text, vscode.TreeItemCollapsibleState.None);
@@ -336,7 +336,7 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
 
     const items: TreeItemData[] = [];
 
-    // ?? Period picker (single row at top � click opens QuickPick) ?????????????
+    // ?? Period picker (single row at top — click opens QuickPick) ?????????????
     const monthListMd = this.availableMonths.length === 0
       ? '_No data yet_'
       : this.availableMonths
