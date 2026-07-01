@@ -1,11 +1,12 @@
 ﻿import * as vscode from 'vscode';
 import { TrackerDatabase } from '../../db/database';
-import { SessionInfo, SessionStats } from '../../core/types';
+import { SessionInfo, SessionStats, ProviderId } from '../../core/types';
 import { formatTokens, formatDateTime, getDateGroup, formatDuration } from '../../util/dateUtils';
-import { computeBillingStatus, getMultiplier, computeCostUSD, getBillingPeriodBounds } from '../../stats/billingCalculator';
+import { computeBillingStatus, getMultiplier, computeCostUSD, getBillingPeriodBounds, computeClaudeBilling } from '../../stats/billingCalculator';
 import { getConfig } from '../../config';
 
 type TreeItemData =
+  | { kind: 'providerHeader'; provider: ProviderId }                            // colored active-provider row (click to switch)
   | { kind: 'group'; label: string; sessions: (SessionInfo & SessionStats)[] }
   | { kind: 'session'; data: SessionInfo & SessionStats }
   | { kind: 'stat'; label: string; value: string }                              // kept for SessionTreeProvider
@@ -18,8 +19,13 @@ type TreeItemData =
 export class SessionTreeProvider implements vscode.TreeDataProvider<TreeItemData> {
   private _onDidChangeTreeData = new vscode.EventEmitter<TreeItemData | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+  private activeProvider: ProviderId = 'copilot';
 
   constructor(private db: TrackerDatabase) {}
+
+  setActiveProvider(provider: ProviderId): void {
+    this.activeProvider = provider;
+  }
 
   refresh(): void {
     this._onDidChangeTreeData.fire(undefined);
@@ -27,6 +33,9 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeItemData
 
   getTreeItem(element: TreeItemData): vscode.TreeItem {
     switch (element.kind) {
+      case 'providerHeader':
+        return providerHeaderItem(element.provider);
+
       case 'group': {
         const item = new vscode.TreeItem(
           `${element.label} (${element.sessions.length})`,
@@ -119,7 +128,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeItemData
   }
 
   private getRootChildren(): TreeItemData[] {
-    const sessions = this.db.getSessionsWithStats();
+    const sessions = this.db.getSessionsWithStats(undefined, undefined, this.activeProvider);
 
     // Group by date
     const groups = new Map<string, (SessionInfo & SessionStats)[]>();
@@ -129,12 +138,12 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeItemData
       groups.get(group)!.push(s);
     }
 
-    const items: TreeItemData[] = [];
+    const items: TreeItemData[] = [{ kind: 'providerHeader', provider: this.activeProvider }];
     for (const [label, groupSessions] of groups) {
       items.push({ kind: 'group', label, sessions: groupSessions });
     }
 
-    if (items.length === 0) {
+    if (groups.size === 0) {
       items.push({ kind: 'stat', label: 'No sessions found', value: 'Click refresh to scan logs' });
     }
 
@@ -143,17 +152,22 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeItemData
 
   private getSessionChildren(s: SessionInfo & SessionStats): TreeItemData[] {
     const config = getConfig();
-    // Current plan: each user message counts as 1 premium request x model multiplier.
-    const multiplier = getMultiplier(s.dominantModel, config.plan);
-    const currentReqs = Math.round(s.userMessageCount * multiplier * 10) / 10;
-
-    // New plan: USD computed from per-token rates (incl. cached, when available).
+    const isClaude = (s.provider ?? this.activeProvider) === 'claude';
     const costUSD = s.costUSD ?? 0;
-    const credits = Math.round(costUSD * 100 * 10) / 10; // 1 credit = $0.01
 
-    const items: TreeItemData[] = [
-        { kind: 'stat', label: 'Premium reqs (current)', value: `${currentReqs} x${multiplier}` },
-        { kind: 'stat', label: 'Cost (Jun 2026)', value: `$${costUSD.toFixed(3)} (${credits} cr)` },
+    const items: TreeItemData[] = [];
+    if (isClaude) {
+      // Claude: USD only — no premium-requests / credits (GitHub concepts).
+      items.push({ kind: 'stat', label: 'Cost (USD)', value: `$${costUSD.toFixed(3)}` });
+    } else {
+      // Copilot: each user message counts as 1 premium request x model multiplier.
+      const multiplier = getMultiplier(s.dominantModel, config.plan);
+      const currentReqs = Math.round(s.userMessageCount * multiplier * 10) / 10;
+      const credits = Math.round(costUSD * 100 * 10) / 10; // 1 credit = $0.01
+      items.push({ kind: 'stat', label: 'Premium reqs (current)', value: `${currentReqs} x${multiplier}` });
+      items.push({ kind: 'stat', label: 'Cost (Jun 2026)', value: `$${costUSD.toFixed(3)} (${credits} cr)` });
+    }
+    items.push(
       { kind: 'stat', label: 'Audit state', value: s.costAuditState || 'unknown' },
       { kind: 'stat', label: 'Tokens', value: `${formatTokens(s.totalInputTokens)} in / ${formatTokens(s.totalOutputTokens)} out` },
       { kind: 'stat', label: 'Requests', value: String(s.llmRequestCount) },
@@ -161,7 +175,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<TreeItemData
       { kind: 'stat', label: 'Tool calls', value: String(s.toolCallCount) },
       { kind: 'stat', label: 'Turns', value: String(s.turnCount) },
       { kind: 'stat', label: 'Duration', value: formatDuration(s.durationMs) },
-    ];
+    );
     if (s.totalReasoningTokens && s.totalReasoningTokens > 0) {
       items.push({ kind: 'stat', label: 'Reasoning', value: `${formatTokens(s.totalReasoningTokens)} tokens` });
     }
@@ -186,8 +200,17 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
   /** -1 = All Time; 0..N = index into availableMonths (0 = most recent). */
   private selectedMonthIdx = 0;
   private availableMonths: { year: number; month: number; label: string; start: number; end: number }[] = [];
+  private activeProvider: ProviderId = 'copilot';
 
   constructor(private db: TrackerDatabase) {}
+
+  setActiveProvider(provider: ProviderId): void {
+    if (provider === this.activeProvider) { return; }
+    this.activeProvider = provider;
+    // A switch lands on the new provider's current month, never a stale historical
+    // index that could point past its (different) availableMonths list (§15 #8).
+    this.selectedMonthIdx = 0;
+  }
 
   refresh(): void {
     this._onDidChangeTreeData.fire(undefined);
@@ -216,7 +239,7 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
   }
 
   async showMonthPicker(): Promise<void> {
-    const months = this.db.getAvailableMonths();
+    const months = this.db.getAvailableMonths(this.activeProvider);
     type QPI = vscode.QuickPickItem & { idx: number };
     const qpItems: QPI[] = [
       ...months.map((m, i): QPI => ({
@@ -246,6 +269,9 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
 
   getTreeItem(element: TreeItemData): vscode.TreeItem {
     switch (element.kind) {
+      case 'providerHeader':
+        return providerHeaderItem(element.provider);
+
       case 'section': {
         const item = new vscode.TreeItem(element.label, vscode.TreeItemCollapsibleState.None);
         item.iconPath = new vscode.ThemeIcon('dash');
@@ -296,37 +322,40 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
 
   getChildren(): TreeItemData[] {
     const config = getConfig();
-    this.availableMonths = this.db.getAvailableMonths();
+    const isClaude = this.activeProvider === 'claude';
+    this.availableMonths = this.db.getAvailableMonths(this.activeProvider);
 
-    // Clamp index to valid range after a refresh.
-    if (this.selectedMonthIdx >= 0 && this.availableMonths.length > 0) {
-      this.selectedMonthIdx = Math.min(this.selectedMonthIdx, this.availableMonths.length - 1);
+    // Snap the selected index into range. If this provider has no months, or the
+    // index points past its (provider-specific) list, fall back to the current
+    // month (0) so wfBounds is never undefined (§15 #8).
+    if (this.selectedMonthIdx >= 0 && this.selectedMonthIdx >= this.availableMonths.length) {
+      this.selectedMonthIdx = 0;
     }
 
     const isAllTime     = this.selectedMonthIdx === -1;
-    // Current month = index 0.  Do NOT pass periodOverride for index 0 so that
-    // computeBillingStatus uses getBillingPeriodBounds() internally and returns
-    // the correct daysRemaining and aiCreditsQuota for the live billing period.
     const isCurrentMonth = !isAllTime && this.selectedMonthIdx === 0;
 
     let periodOverride: { start: number; end: number } | undefined;
     if (isAllTime) {
-      periodOverride = { start: 0, end: 253402300800000 };       // epoch 0 ? year 9999
+      periodOverride = { start: 0, end: 253402300800000 };       // epoch 0 -> year 9999
     } else if (!isCurrentMonth && this.availableMonths.length > 0) {
       const m = this.availableMonths[this.selectedMonthIdx];
       periodOverride = { start: m.start, end: m.end };
     }
-    // isCurrentMonth: no override ? billing uses current UTC month automatically
 
-    const billing = computeBillingStatus(this.db, config.plan, Date.now(), periodOverride);
-
-    // Resolve concrete period bounds for workflow stats (always a real range, never unbounded).
+    // Resolve concrete period bounds (always a real range, never undefined).
+    const liveBounds = getBillingPeriodBounds();
     const wfBounds = isAllTime
       ? { start: 0, end: 253402300800000 }
       : isCurrentMonth
-        ? getBillingPeriodBounds()
+        ? liveBounds
         : this.availableMonths[this.selectedMonthIdx];
-    const wf = this.db.getWorkflowSummary(wfBounds.start, wfBounds.end);
+    const daysRemaining = isCurrentMonth ? liveBounds.daysRemaining : 0;
+    const wf = this.db.getWorkflowSummary(wfBounds.start, wfBounds.end, this.activeProvider);
+
+    // Copilot billing is skipped entirely for Claude (§15 #5) — it relies on
+    // GitHub premium-request / AI-credit reads that are meaningless for Claude.
+    const billing = isClaude ? undefined : computeBillingStatus(this.db, config.plan, Date.now(), periodOverride);
 
     const periodLabel = isAllTime
       ? 'All Time'
@@ -334,7 +363,7 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
         ? this.availableMonths[this.selectedMonthIdx].label
         : new Date().toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 
-    const items: TreeItemData[] = [];
+    const items: TreeItemData[] = [{ kind: 'providerHeader', provider: this.activeProvider }];
 
     // ?? Period picker (single row at top — click opens QuickPick) ?????????????
     const monthListMd = this.availableMonths.length === 0
@@ -345,14 +374,16 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
     const pickerPeriodHint = isAllTime
       ? 'all months combined'
       : isCurrentMonth
-        ? `${billing.daysRemaining}d remaining`
+        ? `${daysRemaining}d remaining`
         : 'historical';
-    const pickerDesc = `${config.plan.toUpperCase()}  \u00b7  ${pickerPeriodHint}  \u00b7  click to change \u25be`;
+    const planLabel = isClaude ? 'CLAUDE' : `COPILOT ${config.plan.toUpperCase()}`;
+    const pickerDesc = `${planLabel}  \u00b7  ${pickerPeriodHint}  \u00b7  click to change \u25be`;
     const pickerTooltip = `**Billing Period** \u2014 click to change\n\n${monthListMd}`;
     items.push({ kind: 'picker', label: periodLabel, description: pickerDesc, tooltip: pickerTooltip });
 
     // ?? BILLING section ???????????????????????????????????????????????????????
 
+    if (billing) {
     const premUsed  = billing.current.premiumRequestsUsed;
     const premQuota = billing.current.premiumRequestsQuota;
     if (isCurrentMonth) {
@@ -437,6 +468,18 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
         `**Net extra:** $${(billing.new.estimatedCostUSD - promoSavingsUSD).toFixed(2)} above subscription`
       : undefined;
     items.push({ kind: 'metric', label: 'Est. Cost', value: `${costStr}${promoNote}`, icon: 'symbol-numeric', tooltip: costTooltip });
+    } else {
+      // Claude: USD + token totals only — no premium-requests / credits / promo (§7).
+      const cb = computeClaudeBilling(this.db, { start: wfBounds.start, end: wfBounds.end }, periodLabel, config.claudeCostBasis, !isCurrentMonth);
+      const t = cb.tokenTotals;
+      const costLabel = config.claudeCostBasis === 'subscription' ? 'Cost (API-equiv)' : 'Cost (USD)';
+      items.push({ kind: 'metric', label: costLabel, value: `$${cb.costUSD.toFixed(2)}`, icon: 'symbol-numeric', tooltip: cb.notes.join('\n\n') });
+      // "Fresh" input excludes the re-read cached prefix (shown on the Cache row below),
+      // so this reads comparably to Claude Code's own usage panel. Cost uses inclusive input.
+      const freshIn = Math.max(0, t.input - t.cachedInput - t.cacheWrite);
+      items.push({ kind: 'metric', label: 'Tokens', value: `${qFmt(freshIn)} fresh in · ${qFmt(t.output)} out`, icon: 'symbol-numeric', tooltip: `${qFmt(t.input)} total input incl. cache read/write` });
+      items.push({ kind: 'metric', label: 'Cache', value: `${qFmt(t.cachedInput)} read · ${qFmt(t.cacheWrite)} write`, icon: 'database' });
+    }
 
     // ?? WORKFLOW section ??????????????????????????????????????????????????????
     if (wf.totalTurns > 0) {
@@ -450,7 +493,7 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
     }
 
     // ?? TIPS section ?????????????????????????????????????????????????????????
-    if (isCurrentMonth) {
+    if (isCurrentMonth && billing) {
       const tips: string[] = [];
       if (billing.new.percentUsed !== null && billing.new.percentUsed > billing.current.percentUsed * 1.5) {
         tips.push('Tool/subagent calls are FREE now but cost from June 1');
@@ -470,6 +513,21 @@ export class QuickStatsTreeProvider implements vscode.TreeDataProvider<TreeItemD
     items.push({ kind: 'action', label: 'Open Dashboard', command: 'copilotUsageTracker.openDashboard', icon: 'dashboard' });
     return items;
   }
+}
+
+/**
+ * The colored active-provider header row shown at the top of both trees.
+ * Orange detail for Claude, Copilot blue for Copilot. Clicking it switches.
+ */
+function providerHeaderItem(provider: ProviderId): vscode.TreeItem {
+  const isClaude = provider === 'claude';
+  const item = new vscode.TreeItem(isClaude ? 'Claude Code' : 'GitHub Copilot', vscode.TreeItemCollapsibleState.None);
+  item.iconPath = new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor(isClaude ? 'charts.orange' : 'charts.blue'));
+  item.description = 'click to switch ⇄';
+  item.command = { command: 'copilotUsageTracker.toggleProvider', title: 'Switch Provider' };
+  item.tooltip = new vscode.MarkdownString(`Active provider: **${isClaude ? 'Claude Code' : 'GitHub Copilot'}**\n\nClick to switch between GitHub Copilot and Claude Code.`);
+  item.contextValue = 'providerHeader';
+  return item;
 }
 
 /** Unicode block progress bar, 10 chars wide. */

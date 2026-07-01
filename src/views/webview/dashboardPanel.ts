@@ -6,22 +6,26 @@ import {
   OverviewData,
   SessionListData,
   SessionDetailData,
+  ProviderId,
 } from '../../core/types';
 import { dateStringToEpoch } from '../../util/dateUtils';
-import { computeBillingStatus, getBillingPeriodBounds } from '../../stats/billingCalculator';
+import { computeBillingStatus, getBillingPeriodBounds, computeClaudeBilling } from '../../stats/billingCalculator';
 import { getConfig } from '../../config';
 
 export class DashboardPanel {
   public static currentPanel: DashboardPanel | undefined;
   private readonly panel: vscode.WebviewPanel;
   private disposables: vscode.Disposable[] = [];
+  private activeProvider: ProviderId;
 
   private constructor(
     panel: vscode.WebviewPanel,
     private db: TrackerDatabase,
-    private extensionUri: vscode.Uri
+    private extensionUri: vscode.Uri,
+    initialProvider: ProviderId
   ) {
     this.panel = panel;
+    this.activeProvider = initialProvider;
     this.panel.webview.html = this.getHtml();
     this.panel.webview.onDidReceiveMessage(
       (msg: WebviewMessage) => this.handleMessage(msg),
@@ -31,14 +35,14 @@ export class DashboardPanel {
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
   }
 
-  static createOrShow(db: TrackerDatabase, extensionUri: vscode.Uri): void {
+  static createOrShow(db: TrackerDatabase, extensionUri: vscode.Uri, initialProvider: ProviderId = 'copilot'): void {
     if (DashboardPanel.currentPanel) {
       DashboardPanel.currentPanel.panel.reveal(vscode.ViewColumn.One);
       return;
     }
     const panel = vscode.window.createWebviewPanel(
       'copilotUsageDashboard',
-      'Copilot Usage Dashboard',
+      'AI Usage Dashboard',
       vscode.ViewColumn.One,
       {
         enableScripts: true,
@@ -46,7 +50,13 @@ export class DashboardPanel {
         localResourceRoots: [],
       }
     );
-    DashboardPanel.currentPanel = new DashboardPanel(panel, db, extensionUri);
+    DashboardPanel.currentPanel = new DashboardPanel(panel, db, extensionUri, initialProvider);
+  }
+
+  /** Called by the extension when the provider toggle changes — re-query + re-render. */
+  public setActiveProvider(provider: ProviderId): void {
+    this.activeProvider = provider;
+    this.refresh();
   }
 
   public refresh(): void {
@@ -58,10 +68,15 @@ export class DashboardPanel {
       case 'requestOverview':
         this.postMessage({ type: 'overview', data: this.getOverviewData() });
         break;
+      case 'setProvider': {
+        // Route through the command so the trees + globalState update in lockstep.
+        vscode.commands.executeCommand('copilotUsageTracker.setProvider', msg.provider);
+        break;
+      }
       case 'requestSessions': {
         const dateFrom = msg.dateFrom ? dateStringToEpoch(msg.dateFrom) : undefined;
         const dateTo = msg.dateTo ? dateStringToEpoch(msg.dateTo) + 86400000 : undefined;
-        const sessions = this.db.getSessionsWithStats(dateFrom, dateTo);
+        const sessions = this.db.getSessionsWithStats(dateFrom, dateTo, this.activeProvider);
         this.postMessage({ type: 'sessions', data: { sessions, groupBy: msg.groupBy } });
         break;
       }
@@ -78,26 +93,33 @@ export class DashboardPanel {
       }
       case 'requestBilling': {
         const config = getConfig();
-        const billing = computeBillingStatus(
-          this.db, config.plan, Date.now(),
-          { start: msg.periodStart, end: msg.periodEnd }
-        );
-        const wf = this.db.getWorkflowSummary(msg.periodStart, msg.periodEnd);
-        this.postMessage({
-          type: 'billingStatus',
-          data: {
-            ...this.mapBilling(billing, msg.periodLabel),
-            modelStats: this.db.getModelStats(msg.periodStart, msg.periodEnd),
-            workflow: {
-              toolCalls: wf.totalToolCalls,
-              subagents: wf.totalSubagents,
-              turns: wf.totalTurns,
-              errors: wf.totalErrors,
-              turnsPerMsg: wf.avgTurnsPerMessage,
-              toolsPerTurn: wf.avgToolsPerTurn,
-            },
-          },
-        });
+        const wf = this.db.getWorkflowSummary(msg.periodStart, msg.periodEnd, this.activeProvider);
+        const workflow = {
+          toolCalls: wf.totalToolCalls,
+          subagents: wf.totalSubagents,
+          turns: wf.totalTurns,
+          errors: wf.totalErrors,
+          turnsPerMsg: wf.avgTurnsPerMessage,
+          toolsPerTurn: wf.avgToolsPerTurn,
+        };
+        const modelStats = this.db.getModelStats(msg.periodStart, msg.periodEnd, this.activeProvider);
+        if (this.activeProvider === 'claude') {
+          // Claude: USD/token view — never run computeBillingStatus (§15 #5).
+          const cb = computeClaudeBilling(
+            this.db, { start: msg.periodStart, end: msg.periodEnd },
+            msg.periodLabel, config.claudeCostBasis, msg.periodLabel !== 'All Time'
+          );
+          this.postMessage({ type: 'claudeBilling', data: { ...cb, modelStats, workflow } });
+        } else {
+          const billing = computeBillingStatus(
+            this.db, config.plan, Date.now(),
+            { start: msg.periodStart, end: msg.periodEnd }
+          );
+          this.postMessage({
+            type: 'billingStatus',
+            data: { ...this.mapBilling(billing, msg.periodLabel), modelStats, workflow },
+          });
+        }
         break;
       }
       case 'refresh':
@@ -134,19 +156,19 @@ export class DashboardPanel {
 
   private getOverviewData(): OverviewData {
     const config = getConfig();
-    const billing = computeBillingStatus(this.db, config.plan);
+    const provider = this.activeProvider;
     const now = new Date();
     const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const periodLabel = `${MONTH_NAMES[now.getUTCMonth()]} ${now.getUTCFullYear()}`;
     const { start: periodStart, end: periodEnd } = getBillingPeriodBounds();
-    const wf = this.db.getWorkflowSummary(periodStart, periodEnd);
-    return {
-      aggregate: this.db.getAggregateStats(),
-      dailyStats: this.db.getDailyStats(),
-      modelStats: this.db.getModelStats(periodStart, periodEnd),
-      topSessions: this.db.getTopSessions(10),
-      availableMonths: this.db.getAvailableMonths(),
-      billing: this.mapBilling(billing, periodLabel),
+    const wf = this.db.getWorkflowSummary(periodStart, periodEnd, provider);
+    const base = {
+      provider,
+      aggregate: this.db.getAggregateStats(undefined, undefined, provider),
+      dailyStats: this.db.getDailyStats(undefined, undefined, provider),
+      modelStats: this.db.getModelStats(periodStart, periodEnd, provider),
+      topSessions: this.db.getTopSessions(10, provider),
+      availableMonths: this.db.getAvailableMonths(provider),
       workflow: {
         toolCalls: wf.totalToolCalls,
         subagents: wf.totalSubagents,
@@ -156,6 +178,13 @@ export class DashboardPanel {
         toolsPerTurn: wf.avgToolsPerTurn,
       },
     };
+    if (provider === 'claude') {
+      return {
+        ...base,
+        claudeBilling: computeClaudeBilling(this.db, { start: periodStart, end: periodEnd }, periodLabel, config.claudeCostBasis, false),
+      };
+    }
+    return { ...base, billing: this.mapBilling(computeBillingStatus(this.db, config.plan), periodLabel) };
   }
 
   private postMessage(msg: ExtensionMessage): void {
@@ -178,7 +207,7 @@ export class DashboardPanel {
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Copilot Usage Dashboard</title>
+<title>AI Usage Dashboard</title>
 <style nonce="${nonce}">
   :root {
     --bg: var(--vscode-editor-background);
@@ -192,6 +221,8 @@ export class DashboardPanel {
     --success: #3fb950;
     --warning: #d29922;
     --danger: #f85149;
+    --claude: #d97757;   /* Anthropic/Claude orange */
+    --copilot: var(--vscode-charts-blue, #3794ff);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); padding: 20px; max-width: 1200px; margin: 0 auto; }
@@ -329,6 +360,31 @@ export class DashboardPanel {
   .tl-eff-warn { color: var(--warning); }
   .tl-eff-bad { color: var(--danger); }
 
+  /* Expandable timeline items (click to see full detail) */
+  details.tl-msg > summary,
+  details.tl-toolgroup > summary,
+  details.tl-raw > summary { cursor: pointer; list-style: none; outline: none; user-select: none; }
+  details.tl-msg > summary::-webkit-details-marker,
+  details.tl-toolgroup > summary::-webkit-details-marker,
+  details.tl-raw > summary::-webkit-details-marker { display: none; }
+  .chev::after { content: ' ▸'; color: var(--muted); font-size: 0.9em; }
+  details[open] > summary .chev::after { content: ' ▾'; }
+  .tl-expand { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+  .tl-kv { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; font-size: 0.92em; }
+  .tl-kv .k { color: var(--muted); white-space: nowrap; }
+  .tl-kv .v { text-align: right; word-break: break-all; }
+  .tl-full { white-space: pre-wrap; word-break: break-word; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; margin: 6px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.9em; max-height: 340px; overflow: auto; }
+  .tl-toollist { margin-top: 6px; }
+  .tl-toolrow { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; padding: 5px 0 1px; align-items: baseline; }
+  .tl-toolrow .tname { font-weight: 600; }
+  .tl-toolrow .tstatus.err { color: var(--danger); font-weight: 600; }
+  .tl-toolrow .tdur { color: var(--muted); }
+  .tl-toolsub { font-size: 0.78em; color: var(--muted); padding-bottom: 5px; border-bottom: 1px solid var(--border); }
+  .tl-toollist > .tl-toolsub:last-child { border-bottom: none; }
+  .tl-expand-hint { color: var(--accent); font-size: 0.78em; margin-left: 6px; }
+  details.tl-raw { margin-top: 6px; }
+  details.tl-raw > summary { color: var(--accent); font-size: 0.78em; }
+
   /* Legend */
   .legend { margin-top: 24px; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85em; }
   .legend summary { padding: 10px 14px; cursor: pointer; color: var(--accent); font-weight: 600; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.3px; }
@@ -336,10 +392,24 @@ export class DashboardPanel {
   .legend dl { padding: 0 14px 14px; margin: 0; }
   .legend dt { font-weight: 600; margin-top: 10px; color: var(--fg); }
   .legend dd { margin: 3px 0 0 0; color: var(--muted); line-height: 1.5; }
+
+  /* Provider toggle */
+  .provider-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .provider-pill { background: var(--card-bg); color: var(--muted); border: none; padding: 4px 12px; cursor: pointer; font-size: 0.85em; font-family: inherit; }
+  .provider-pill:hover { color: var(--fg); }
+  .provider-pill.active { color: #fff; font-weight: 600; }
+  .provider-pill.active[data-provider="copilot"] { background: var(--copilot); }
+  .provider-pill.active[data-provider="claude"]  { background: var(--claude); }
+  /* Colored provider dot next to the dashboard title. */
+  .title-dot { margin-right: 8px; font-size: 0.7em; vertical-align: middle; }
+  .title-dot.copilot { color: var(--copilot); }
+  .title-dot.claude  { color: var(--claude); }
+  /* Premium-request columns are a Copilot concept — hidden when viewing Claude. */
+  body[data-provider="claude"] .col-premium { display: none; }
 </style>
 </head>
 <body>
-<h1>Copilot Usage Dashboard</h1>
+<h1 id="dashboard-title"><span id="title-dot" class="title-dot copilot">●</span><span id="title-text">AI Usage Dashboard</span></h1>
 
 <div class="tabs">
   <div class="tab active" data-tab="overview">Overview</div>
@@ -349,7 +419,11 @@ export class DashboardPanel {
 <div id="overview" class="tab-content active">
   <div class="loading" id="overview-loading">Loading...</div>
   <div id="overview-content" style="display:none;">
-    <div id="billing-period-row" style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+    <div id="billing-period-row" style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap;">
+      <div class="provider-toggle" id="provider-toggle">
+        <button type="button" class="provider-pill" data-provider="copilot">GitHub Copilot</button>
+        <button type="button" class="provider-pill" data-provider="claude">Claude</button>
+      </div>
       <select id="billing-period-select" style="background:var(--card-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 10px;font-size:0.85em;cursor:pointer;min-width:160px;">
         <option value="">Loading\u2026</option>
       </select>
@@ -365,7 +439,7 @@ export class DashboardPanel {
     <div class="chart-container"><canvas id="modelChart"></canvas></div>
     <h2>Top Sessions</h2>
     <table id="topSessionsTable"><thead><tr>
-      <th>Date</th><th>Tokens</th><th>Premium reqs</th><th>Cost (Jun)</th><th>Model</th><th>Msgs</th>
+      <th>Date</th><th>Tokens</th><th class="col-premium">Premium reqs</th><th>Cost</th><th>Model</th><th>Msgs</th>
     </tr></thead><tbody></tbody></table>
   </div>
 </div>
@@ -379,8 +453,8 @@ export class DashboardPanel {
   <table id="sessionsTable"><thead><tr>
     <th data-sort="startTime">Date</th>
     <th data-sort="totalTokens">Tokens</th>
-    <th data-sort="_costNow">Premium reqs</th>
-    <th data-sort="_costJun">Cost (Jun)</th>
+    <th data-sort="_costNow" class="col-premium">Premium reqs</th>
+    <th data-sort="_costJun">Cost</th>
     <th data-sort="_costPerMsg">$ / Msg</th>
     <th data-sort="dominantModel">Model</th>
     <th data-sort="repository">Repo</th>
@@ -398,6 +472,7 @@ export class DashboardPanel {
 const vscode = acquireVsCodeApi();
 let overviewData = null;
 let sessionsData = [];
+let activeProvider = 'copilot';
 let sortCol = 'startTime';
 let sortDir = -1;
 
@@ -470,6 +545,29 @@ function sessionBilling(s) {
   return { reqs, mult, credits, costUSD };
 }
 
+// Provider toggle pills
+document.querySelectorAll('.provider-pill').forEach(pill => {
+  pill.addEventListener('click', () => {
+    const p = pill.dataset.provider;
+    if (p === activeProvider) { return; }
+    // Reset caches so the Sessions tab refetches for the new provider.
+    sessionsData = [];
+    overviewData = null;
+    vscode.postMessage({ type: 'setProvider', provider: p });
+  });
+});
+
+function applyProviderChrome() {
+  document.body.dataset.provider = activeProvider;
+  const dot = document.getElementById('title-dot');
+  const txt = document.getElementById('title-text');
+  if (dot) { dot.className = 'title-dot ' + activeProvider; }
+  if (txt) { txt.textContent = activeProvider === 'claude' ? 'Claude Code Usage' : 'GitHub Copilot Usage'; }
+  document.querySelectorAll('.provider-pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.provider === activeProvider);
+  });
+}
+
 // Tab switching
 document.querySelectorAll('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
@@ -496,21 +594,67 @@ window.addEventListener('message', e => {
       if (msg.data.modelStats) { renderModelChart(msg.data.modelStats); }
       if (msg.data.workflow)   { renderWorkflow(msg.data.workflow); }
       break;
+    case 'claudeBilling':
+      renderClaudeBilling(msg.data);
+      if (msg.data.modelStats) { renderModelChart(msg.data.modelStats); }
+      if (msg.data.workflow)   { renderWorkflow(msg.data.workflow); }
+      break;
   }
 });
 
 function renderOverview(data) {
   overviewData = data;
+  activeProvider = data.provider || 'copilot';
+  applyProviderChrome();
   document.getElementById('overview-loading').style.display = 'none';
   document.getElementById('overview-content').style.display = 'block';
 
   populateBillingPeriodSelect(data.availableMonths || []);
-  renderBilling(data.billing);
+  if (activeProvider === 'claude') { renderClaudeBilling(data.claudeBilling); }
+  else { renderBilling(data.billing); }
   renderWorkflow(data.workflow);
   renderMetrics(data.aggregate);
   renderDailyChart(data.dailyStats);
   renderModelChart(data.modelStats);
   renderTopSessions(data.topSessions);
+}
+
+function renderClaudeBilling(b) {
+  const el = document.getElementById('billing-section');
+  if (!b) { el.innerHTML = ''; return; }
+  const t = b.tokenTotals || { input: 0, output: 0, cachedInput: 0, cacheWrite: 0 };
+  const costLabel = b.costBasis === 'subscription' ? 'API-equivalent cost' : 'Cost (Anthropic list price)';
+  let html = '<h2>Billing — Claude' + (b.periodLabel ? ' | ' + esc(b.periodLabel) : '') + '</h2>';
+  html += '<div class="billing-grid">';
+  html += '<div class="billing-card">';
+  html += '<h3>' + esc(costLabel) + '</h3>';
+  html += '<div class="headline">$' + (b.costUSD || 0).toFixed(2) + '</div>';
+  html += '<div class="sub">' + esc(b.periodLabel || '') + '</div>';
+  html += '<div class="billing-breakdown">';
+  html += '<div class="row" style="font-weight:600"><span>Model</span><span>Cost</span></div>';
+  for (const m of (b.perModel || []).slice(0, 5)) {
+    html += '<div class="row"><span>' + esc(m.model) + '</span><span>$' + m.costUSD.toFixed(2) + ' (' + fmt(m.inputTokens) + ' in / ' + fmt(m.outputTokens) + ' out)</span></div>';
+  }
+  html += '</div></div>';
+  // "Fresh" (billable) input = inclusive input minus the cached prefix (cache read)
+  // and the cache-write bucket. The headline shows fresh + output so it is comparable
+  // to Claude Code's own usage panel (which excludes re-read cached tokens); the full
+  // cache-inclusive input is shown as a breakdown row. Cost still uses inclusive input.
+  const freshIn = Math.max(0, t.input - t.cachedInput - t.cacheWrite);
+  html += '<div class="billing-card">';
+  html += '<h3>Tokens</h3>';
+  html += '<div class="headline">' + fmt(freshIn + t.output) + '</div>';
+  html += '<div class="sub">' + fmt(freshIn) + ' fresh in · ' + fmt(t.output) + ' out</div>';
+  html += '<div class="billing-breakdown">';
+  html += '<div class="row"><span>Cache read (0.1× input)</span><span>' + fmt(t.cachedInput) + '</span></div>';
+  html += '<div class="row"><span>Cache write</span><span>' + fmt(t.cacheWrite) + '</span></div>';
+  html += '<div class="row"><span>Total input incl. cache</span><span>' + fmt(t.input) + '</span></div>';
+  html += '</div></div>';
+  html += '</div>';
+  html += '<div class="billing-comparison">';
+  for (const n of (b.notes || [])) { html += '<div class="note">[i] ' + esc(n) + '</div>'; }
+  html += '</div>';
+  el.innerHTML = html;
 }
 
 // Keyed period options map populated by populateBillingPeriodSelect.
@@ -671,7 +815,7 @@ function renderTopSessions(topSessions) {
   tbody.innerHTML = topSessions.map(s => {
     const date = new Date(s.startTime).toLocaleDateString();
     const b = sessionBilling(s);
-    return '<tr><td>' + esc(date) + '</td><td>' + fmt(s.total_tokens || s.totalTokens || 0) + '</td><td>' + b.reqs + ' x' + b.mult + '</td><td>$' + b.costUSD.toFixed(3) + '</td><td><span class="badge">' + esc(s.dominant_model || s.dominantModel || '') + '</span></td><td>' + (s.user_message_count || s.userMessageCount || 0) + '</td></tr>';
+    return '<tr><td>' + esc(date) + '</td><td>' + fmt(s.total_tokens || s.totalTokens || 0) + '</td><td class="col-premium">' + b.reqs + ' x' + b.mult + '</td><td>$' + b.costUSD.toFixed(3) + '</td><td><span class="badge">' + esc(s.dominant_model || s.dominantModel || '') + '</span></td><td>' + (s.user_message_count || s.userMessageCount || 0) + '</td></tr>';
   }).join('');
 }
 
@@ -714,7 +858,7 @@ function renderSessionsTable() {
     const dsBadge = ds === 'otel' ? '<span class="badge badge-otel">OTel</span>' : ds === 'hybrid' ? '<span class="badge badge-hybrid">Hyb</span>' : '';
     const audit = s.cost_audit_state || s.costAuditState || '';
     const auditBadge = audit && audit !== 'measured' ? ' <span class="badge badge-hybrid">' + esc(audit) + '</span>' : '';
-    return '<tr class="clickable" data-sid="' + sid + '"><td>' + esc(date) + '</td><td>' + fmt(tokens) + '</td><td>' + b.reqs + ' x' + b.mult + '</td><td>$' + b.costUSD.toFixed(3) + auditBadge + '</td><td>' + cpm + '</td><td><span class="badge">' + esc(model) + '</span></td><td>' + (repoShort ? esc(repoShort) : '<span class="muted">-</span>') + ' ' + dsBadge + '</td><td>' + msgs + '</td><td>' + esc(dur) + '</td></tr>';
+    return '<tr class="clickable" data-sid="' + sid + '"><td>' + esc(date) + '</td><td>' + fmt(tokens) + '</td><td class="col-premium">' + b.reqs + ' x' + b.mult + '</td><td>$' + b.costUSD.toFixed(3) + auditBadge + '</td><td>' + cpm + '</td><td><span class="badge">' + esc(model) + '</span></td><td>' + (repoShort ? esc(repoShort) : '<span class="muted">-</span>') + ' ' + dsBadge + '</td><td>' + msgs + '</td><td>' + esc(dur) + '</td></tr>';
   }).join('');
   tbody.querySelectorAll('tr.clickable').forEach(row => {
     row.addEventListener('click', () => {
@@ -1021,6 +1165,8 @@ function renderDetail(data) {
   let prevTs = 0;
   let prevInputTok = 0;
 
+  const kv = (k, v) => '<div class="tl-kv"><span class="k">' + esc(k) + '</span><span class="v">' + v + '</span></div>';
+
   parts.push('<div class="timeline">');
 
   for (let idx = 0; idx < processedTimeline.length; idx++) {
@@ -1030,10 +1176,21 @@ function renderDetail(data) {
       const m = ev.data;
       const preview = m.content_preview || m.contentPreview || '';
       const len = m.content_length || m.contentLength || 0;
-      parts.push('<div class="tl-msg"><span class="tl-badge tl-badge-msg">USER</span> ');
-      parts.push('<span class="tl-text">' + esc(preview.substring(0, 150)) + (len > 150 ? '...' : '') + '</span>');
-      parts.push('<span class="tl-meta">' + new Date(ev.ts).toLocaleTimeString() + ' | ' + len + ' chars</span>');
-      parts.push('</div>');
+      const spanId = m.span_id || m.spanId || '';
+      parts.push('<details class="tl-msg">');
+      parts.push('<summary><span class="tl-badge tl-badge-msg">USER</span> ');
+      parts.push('<span class="tl-text">' + esc(preview.substring(0, 150)) + (preview.length > 150 ? '…' : '') + '</span>');
+      parts.push('<span class="tl-meta"> ' + new Date(ev.ts).toLocaleTimeString() + ' | ' + len + ' chars</span><span class="chev"></span></summary>');
+      parts.push('<div class="tl-expand">');
+      const fullMsg = m.content_full || m.contentFull || preview;
+      parts.push('<div class="tl-full">' + esc(fullMsg) + '</div>');
+      if (len > fullMsg.length) {
+        parts.push('<div class="tl-meta">Showing the first ' + fmt(fullMsg.length) + ' of ' + fmt(len) + ' characters (field is capped). Re-sync after clearing cache if this is an older session.</div>');
+      }
+      parts.push(kv('Time', esc(new Date(ev.ts).toLocaleString())));
+      parts.push(kv('Length', len + ' chars'));
+      if (spanId) { parts.push(kv('Span ID', esc(spanId))); }
+      parts.push('</div></details>');
       turnIndex = 0;
       prevInputTok = 0;
 
@@ -1059,13 +1216,37 @@ function renderDetail(data) {
         return esc(name) + (v.count > 1 ? ' x' + v.count : '') + (v.dur > 1000 ? ' (' + fmtDur(v.dur) + ')' : '') + e;
       }).join(', ');
 
-      parts.push('<div class="tl-toolgroup' + errMark + '">');
-      parts.push('<span class="tl-badge tl-badge-tool">TOOLS</span> ');
+      parts.push('<details class="tl-toolgroup' + errMark + '">');
+      parts.push('<summary><span class="tl-badge tl-badge-tool">TOOLS</span> ');
       parts.push('<span class="tl-tools-inline">' + toolSummary + '</span>');
-      if (totalDur > 1000) {
-        parts.push('<span class="tl-meta"> | Total: ' + fmtDur(totalDur) + '</span>');
+      if (totalDur > 1000) { parts.push('<span class="tl-meta"> | Total: ' + fmtDur(totalDur) + '</span>'); }
+      parts.push('<span class="tl-expand-hint">' + tools.length + ' call' + (tools.length > 1 ? 's' : '') + '</span><span class="chev"></span></summary>');
+
+      // Expanded: every individual tool call with full metadata.
+      parts.push('<div class="tl-expand"><div class="tl-toollist">');
+      for (const t of tools) {
+        const tn = esc(t.tool_name || t.toolName || 'unknown');
+        const isErr = t.status === 'error';
+        const dur = t.duration || 0;
+        const tType = t.tool_type || t.toolType || '';
+        const tCallId = t.tool_call_id || t.toolCallId || '';
+        const tTs = t.timestamp || t.ts || 0;
+        parts.push('<div class="tl-toolrow"><span class="tname">' + tn + '</span>');
+        parts.push('<span class="tstatus' + (isErr ? ' err' : '') + '">' + (isErr ? 'error' : 'ok') + '</span>');
+        parts.push('<span class="tdur">' + (dur > 0 ? fmtDur(dur) : '—') + '</span></div>');
+        const sub = [];
+        if (tTs) { sub.push(new Date(tTs).toLocaleTimeString()); }
+        if (tType) { sub.push('type: ' + esc(tType)); }
+        if (tCallId) { sub.push('id: ' + esc(tCallId)); }
+        if (t.is_subagent || t.isSubagent) { sub.push('subagent'); }
+        parts.push('<div class="tl-toolsub">' + (sub.length ? sub.join(' &middot; ') : '&nbsp;') + '</div>');
+        // Input (command / script / file edit) and the output it produced.
+        const tArgs = t.args || '';
+        const tResult = t.result || t.errorText || '';
+        if (tArgs) { parts.push('<div class="tl-meta">input:</div><div class="tl-full">' + esc(tArgs) + '</div>'); }
+        if (tResult) { parts.push('<div class="tl-meta">output' + (isErr ? ' (error)' : '') + ':</div><div class="tl-full">' + esc(tResult) + '</div>'); }
       }
-      parts.push('</div>');
+      parts.push('</div></div></details>');
 
     } else if (ev.type === 'llm') {
       turnIndex++;
@@ -1149,6 +1330,48 @@ function renderDetail(data) {
 
       // Running total
       parts.push('<div class="tl-running">' + fmt(runningTokens) + ' tokens cumulative | $' + runningCredits.toFixed(3) + ' total spend</div>');
+
+      // Expandable raw detail — every persisted field for this request.
+      const srcIn = r.input_tokens_source || r.inputTokensSource || '';
+      const srcOut = r.output_tokens_source || r.outputTokensSource || '';
+      const srcCached = r.cached_input_tokens_source || r.cachedInputTokensSource || '';
+      const srcCw = r.cache_write_tokens_source || r.cacheWriteTokensSource || '';
+      const maxTok = r.max_tokens ?? r.maxTokens ?? 0;
+      const traceId = r.trace_id || r.traceId || '';
+      const convId = r.conversation_id || r.conversationId || '';
+      const spanId = r.span_id || r.spanId || '';
+      const parentSpan = r.parent_span_id || r.parentSpanId || '';
+      const directCredits = r.direct_credits ?? r.directCredits;
+      const auditFlags = r.token_audit_flags || r.tokenAuditFlags || [];
+      const promptPreview = r.user_request_preview || r.userRequestPreview || '';
+      const src = (s) => s ? ' <span style="color:var(--muted)">(' + esc(s) + ')</span>' : '';
+      const outText = r.output_text || r.outputText || '';
+      const reasonText = r.reasoning_text || r.reasoningText || '';
+      parts.push('<details class="tl-raw"><summary>Output &amp; request details<span class="chev"></span></summary><div class="tl-expand">');
+      if (outText) { parts.push('<div class="tl-meta">Generated output:</div><div class="tl-full">' + esc(outText) + '</div>'); }
+      if (reasonText) { parts.push('<div class="tl-meta">Reasoning / thinking:</div><div class="tl-full">' + esc(reasonText) + '</div>'); }
+      parts.push(kv('Model requested', esc(r.model || '')));
+      if (respModel && respModel !== r.model) { parts.push(kv('Model responded', esc(respModel))); }
+      parts.push(kv('Input tokens', fmt(inTok) + src(srcIn)));
+      parts.push(kv('Output tokens', fmt(outTok) + src(srcOut)));
+      if (cachedTok > 0) { parts.push(kv('Cached input', fmt(cachedTok) + src(srcCached))); }
+      if (cwTok > 0) { parts.push(kv('Cache write', fmt(cwTok) + src(srcCw))); }
+      if (reasoningTok > 0) { parts.push(kv('Reasoning', fmt(reasoningTok))); }
+      if (maxTok > 0) { parts.push(kv('Max tokens', fmt(maxTok))); }
+      parts.push(kv('Cost', '$' + costUSD.toFixed(4)));
+      parts.push(kv('New-work cost', '$' + marginalCost.toFixed(4) + ' (' + marginalPct + '%)'));
+      parts.push(kv('TTFT', ttft + ' ms'));
+      parts.push(kv('Duration', fmtDur(dur)));
+      parts.push(kv('Status', esc(r.status || '') + (r.error ? ': ' + esc(String(r.error)) : '')));
+      if (directCredits !== undefined && directCredits !== null) { parts.push(kv('Direct credits (API)', Number(directCredits).toFixed(4))); }
+      if (spanId) { parts.push(kv('Span ID', esc(spanId))); }
+      if (parentSpan) { parts.push(kv('Parent span', esc(parentSpan))); }
+      if (traceId) { parts.push(kv('Trace ID', esc(traceId))); }
+      if (convId) { parts.push(kv('Conversation', esc(convId))); }
+      if (auditFlags && auditFlags.length) { parts.push(kv('Audit flags', esc(auditFlags.join(', ')))); }
+      if (promptPreview) { parts.push('<div class="tl-meta" style="margin-top:6px">Prompt preview:</div><div class="tl-full">' + esc(promptPreview) + '</div>'); }
+      parts.push('</div></details>');
+
       parts.push('</div>');
     }
   }

@@ -13,6 +13,7 @@ import {
   DailyStats,
   ModelStats,
   TokenDataSource,
+  ProviderId,
 } from '../core/types';
 import { computeCostUSD, getMultiplier, getPricing } from '../stats/billingCalculator';
 import { estimateSessionCaching } from '../stats/cacheEstimator';
@@ -21,7 +22,7 @@ type SqlValue = string | number | null | Uint8Array;
 type SqlRow = Record<string, unknown>;
 
 const DB_FILENAME = 'copilot-usage.db';
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 12;
 
 export class TrackerDatabase {
   private db!: SqlJsDatabase;
@@ -189,6 +190,55 @@ export class TrackerDatabase {
       this.addColumnIfMissing(reqCols, 'llm_requests', 'direct_credits', 'REAL');
       this.addColumnIfMissing(reqCols, 'llm_requests', 'direct_credits_source', 'TEXT');
     }
+    if (from < 9) {
+      // Add the `provider` discriminator (multi-provider support: Copilot + Claude).
+      // Orthogonal to data_source. Existing rows default to 'copilot' via the column
+      // DEFAULT, so this is a pure additive migration — no backfill, no data loss.
+      // Must mirror the columns added to SCHEMA_SQL (fresh installs run SCHEMA_SQL
+      // and return before migrate(), so both code paths must agree).
+      const sessCols = this.getColumnNames('sessions');
+      this.addColumnIfMissing(sessCols, 'sessions', 'provider', "TEXT DEFAULT 'copilot'");
+
+      const reqCols = this.getColumnNames('llm_requests');
+      this.addColumnIfMissing(reqCols, 'llm_requests', 'provider', "TEXT DEFAULT 'copilot'");
+
+      const statsCols = this.getColumnNames('session_stats');
+      this.addColumnIfMissing(statsCols, 'session_stats', 'provider', "TEXT DEFAULT 'copilot'");
+
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_llm_provider ON llm_requests(provider)');
+    }
+    if (from < 10) {
+      // Rich-detail capture: full message text, tool input/output, assistant output.
+      // Nullable additive columns; existing rows stay NULL until re-parsed.
+      const msgCols = this.getColumnNames('user_messages');
+      this.addColumnIfMissing(msgCols, 'user_messages', 'content_full', 'TEXT');
+
+      const toolCols = this.getColumnNames('tool_calls');
+      this.addColumnIfMissing(toolCols, 'tool_calls', 'args', 'TEXT');
+      this.addColumnIfMissing(toolCols, 'tool_calls', 'result', 'TEXT');
+      this.addColumnIfMissing(toolCols, 'tool_calls', 'error_text', 'TEXT');
+
+      const reqCols = this.getColumnNames('llm_requests');
+      this.addColumnIfMissing(reqCols, 'llm_requests', 'output_text', 'TEXT');
+      this.addColumnIfMissing(reqCols, 'llm_requests', 'reasoning_text', 'TEXT');
+    }
+    if (from < 11) {
+      // The v10 rich-detail columns are only populated when a session is parsed,
+      // but existing sessions are mtime-skipped on sync. Reset file_mtime so the
+      // next syncAll re-parses every session once and backfills the new fields
+      // (output text, tool input/result, full messages). One-time cost.
+      this.db.run('UPDATE sessions SET file_mtime = 0');
+    }
+    if (from < 12) {
+      // Add the 1-hour-TTL cache-write subset column (Anthropic prices 1h writes at
+      // 2x input vs 1.25x for 5m). Also force a full re-parse: (a) to backfill this
+      // column from cache_creation.ephemeral_1h_input_tokens, and (b) because Claude
+      // discovery now recurses the session subtree (subagents/workflows/wf_*/…), so a
+      // re-parse captures the previously-dropped nested subagent transcripts.
+      const reqCols = this.getColumnNames('llm_requests');
+      this.addColumnIfMissing(reqCols, 'llm_requests', 'cache_write_1h_tokens', 'INTEGER DEFAULT 0');
+      this.db.run('UPDATE sessions SET file_mtime = 0');
+    }
   }
 
   private save(): void {
@@ -220,27 +270,27 @@ export class TrackerDatabase {
 
   upsertSession(s: SessionInfo, mtimeMs: number): void {
     this.db.run(
-      `INSERT INTO sessions (id, workspace_id, dir_path, start_time, end_time, copilot_version, vscode_version, file_mtime, parsed_at, repository, branch, cwd, agent_name, agent_description, data_source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sessions (id, workspace_id, dir_path, start_time, end_time, copilot_version, vscode_version, file_mtime, parsed_at, repository, branch, cwd, agent_name, agent_description, data_source, provider)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          end_time=excluded.end_time, copilot_version=excluded.copilot_version,
          vscode_version=excluded.vscode_version, file_mtime=excluded.file_mtime, parsed_at=excluded.parsed_at,
          repository=excluded.repository, branch=excluded.branch, cwd=excluded.cwd,
          agent_name=excluded.agent_name, agent_description=excluded.agent_description,
-         data_source=excluded.data_source`,
+         data_source=excluded.data_source, provider=excluded.provider`,
       [s.id, s.workspaceId, s.dirPath, s.startTime, s.endTime, s.copilotVersion, s.vscodeVersion, mtimeMs, Date.now(),
-       s.repository ?? null, s.branch ?? null, s.cwd ?? null, s.agentName ?? null, s.agentDescription ?? null, s.dataSource ?? 'jsonl']
+       s.repository ?? null, s.branch ?? null, s.cwd ?? null, s.agentName ?? null, s.agentDescription ?? null, s.dataSource ?? 'jsonl', s.provider ?? 'copilot']
     );
     this.markDirty();
   }
 
   insertLLMRequests(requests: LLMRequestRecord[]): void {
     const stmt = this.db.prepare(
-      `INSERT OR REPLACE INTO llm_requests (session_id, span_id, parent_span_id, timestamp, duration, model, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, ttft, max_tokens, status, error, is_subagent, subagent_name, user_request_preview, reasoning_tokens, response_model, trace_id, conversation_id, input_tokens_source, output_tokens_source, cached_input_tokens_source, cache_write_tokens_source, reasoning_tokens_source, prompt_export_key, cache_match_confidence, token_audit_flags, direct_credits, direct_credits_source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT OR REPLACE INTO llm_requests (session_id, span_id, parent_span_id, timestamp, duration, model, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, cache_write_1h_tokens, ttft, max_tokens, status, error, is_subagent, subagent_name, user_request_preview, reasoning_tokens, response_model, trace_id, conversation_id, input_tokens_source, output_tokens_source, cached_input_tokens_source, cache_write_tokens_source, reasoning_tokens_source, prompt_export_key, cache_match_confidence, token_audit_flags, direct_credits, direct_credits_source, provider, output_text, reasoning_text)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const r of requests) {
-      stmt.run([r.sessionId, r.spanId, r.parentSpanId ?? null, r.timestamp, r.duration, r.model, r.inputTokens, r.outputTokens, r.cachedInputTokens ?? 0, r.cacheWriteTokens ?? 0, r.ttft, r.maxTokens, r.status, r.error ?? null, r.isSubagent ? 1 : 0, r.subagentName ?? null, r.userRequestPreview ?? null, r.reasoningTokens ?? 0, r.responseModel ?? null, r.traceId ?? null, r.conversationId ?? null, r.inputTokensSource ?? 'unknown', r.outputTokensSource ?? 'unknown', r.cachedInputTokensSource ?? 'unknown', r.cacheWriteTokensSource ?? 'unknown', r.reasoningTokensSource ?? 'unknown', r.promptExportKey ?? null, r.cacheMatchConfidence ?? null, JSON.stringify(r.tokenAuditFlags ?? []), r.directCredits ?? null, r.directCreditsSource ?? null]);
+      stmt.run([r.sessionId, r.spanId, r.parentSpanId ?? null, r.timestamp, r.duration, r.model, r.inputTokens, r.outputTokens, r.cachedInputTokens ?? 0, r.cacheWriteTokens ?? 0, r.cacheWrite1hTokens ?? 0, r.ttft, r.maxTokens, r.status, r.error ?? null, r.isSubagent ? 1 : 0, r.subagentName ?? null, r.userRequestPreview ?? null, r.reasoningTokens ?? 0, r.responseModel ?? null, r.traceId ?? null, r.conversationId ?? null, r.inputTokensSource ?? 'unknown', r.outputTokensSource ?? 'unknown', r.cachedInputTokensSource ?? 'unknown', r.cacheWriteTokensSource ?? 'unknown', r.reasoningTokensSource ?? 'unknown', r.promptExportKey ?? null, r.cacheMatchConfidence ?? null, JSON.stringify(r.tokenAuditFlags ?? []), r.directCredits ?? null, r.directCreditsSource ?? null, r.provider ?? 'copilot', r.outputText ?? null, r.reasoningText ?? null]);
     }
     stmt.free();
     this.markDirty();
@@ -248,10 +298,10 @@ export class TrackerDatabase {
 
   insertUserMessages(messages: UserMessageRecord[]): void {
     const stmt = this.db.prepare(
-      `INSERT INTO user_messages (session_id, span_id, timestamp, content_length, content_preview) VALUES (?, ?, ?, ?, ?)`
+      `INSERT INTO user_messages (session_id, span_id, timestamp, content_length, content_preview, content_full) VALUES (?, ?, ?, ?, ?, ?)`
     );
     for (const m of messages) {
-      stmt.run([m.sessionId, m.spanId, m.timestamp, m.contentLength, m.contentPreview]);
+      stmt.run([m.sessionId, m.spanId, m.timestamp, m.contentLength, m.contentPreview, m.contentFull ?? null]);
     }
     stmt.free();
     this.markDirty();
@@ -259,10 +309,10 @@ export class TrackerDatabase {
 
   insertToolCalls(toolCalls: ToolCallRecord[]): void {
     const stmt = this.db.prepare(
-      `INSERT INTO tool_calls (session_id, span_id, parent_span_id, timestamp, duration, tool_name, status, is_subagent, tool_type, tool_call_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO tool_calls (session_id, span_id, parent_span_id, timestamp, duration, tool_name, status, is_subagent, tool_type, tool_call_id, args, result, error_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const t of toolCalls) {
-      stmt.run([t.sessionId, t.spanId, t.parentSpanId ?? null, t.timestamp, t.duration, t.toolName, t.status, t.isSubagent ? 1 : 0, t.toolType ?? null, t.toolCallId ?? null]);
+      stmt.run([t.sessionId, t.spanId, t.parentSpanId ?? null, t.timestamp, t.duration, t.toolName, t.status, t.isSubagent ? 1 : 0, t.toolType ?? null, t.toolCallId ?? null, t.args ?? null, t.result ?? null, t.errorText ?? null]);
     }
     stmt.free();
     this.markDirty();
@@ -270,8 +320,8 @@ export class TrackerDatabase {
 
   upsertSessionStats(stats: SessionStats): void {
     this.db.run(
-      `INSERT INTO session_stats (session_id, total_input_tokens, total_output_tokens, total_tokens, weighted_cost, llm_request_count, user_message_count, tool_call_count, error_count, turn_count, subagent_count, avg_tokens_per_request, avg_ttft, duration_ms, models_used, dominant_model, efficiency_score, rework_score, total_reasoning_tokens, total_cached_tokens, total_cache_write_tokens, data_source, cost_audit_state, cost_audit_flags, pricing_table_version, cost_formula_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO session_stats (session_id, total_input_tokens, total_output_tokens, total_tokens, weighted_cost, llm_request_count, user_message_count, tool_call_count, error_count, turn_count, subagent_count, avg_tokens_per_request, avg_ttft, duration_ms, models_used, dominant_model, efficiency_score, rework_score, total_reasoning_tokens, total_cached_tokens, total_cache_write_tokens, data_source, cost_audit_state, cost_audit_flags, pricing_table_version, cost_formula_version, provider)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          total_input_tokens=excluded.total_input_tokens, total_output_tokens=excluded.total_output_tokens,
          total_tokens=excluded.total_tokens, weighted_cost=excluded.weighted_cost,
@@ -285,7 +335,7 @@ export class TrackerDatabase {
          total_cached_tokens=excluded.total_cached_tokens, total_cache_write_tokens=excluded.total_cache_write_tokens,
          data_source=excluded.data_source, cost_audit_state=excluded.cost_audit_state,
          cost_audit_flags=excluded.cost_audit_flags, pricing_table_version=excluded.pricing_table_version,
-         cost_formula_version=excluded.cost_formula_version`,
+         cost_formula_version=excluded.cost_formula_version, provider=excluded.provider`,
       [stats.sessionId, stats.totalInputTokens, stats.totalOutputTokens,
        stats.totalTokens, stats.costUSD, stats.llmRequestCount,
        stats.userMessageCount, stats.toolCallCount, stats.errorCount,
@@ -295,7 +345,7 @@ export class TrackerDatabase {
        stats.totalReasoningTokens ?? 0, stats.totalCachedTokens ?? 0,
        stats.totalCacheWriteTokens ?? 0, stats.dataSource ?? 'jsonl',
        stats.costAuditState ?? 'estimated', JSON.stringify(stats.costAuditFlags ?? []),
-       stats.pricingTableVersion ?? 0, stats.costFormulaVersion ?? 0]
+       stats.pricingTableVersion ?? 0, stats.costFormulaVersion ?? 0, stats.provider ?? 'copilot']
     );
     this.markDirty();
   }
@@ -318,6 +368,22 @@ export class TrackerDatabase {
     this.db.run('DELETE FROM user_messages WHERE session_id = ?', [sessionId]);
     this.db.run('DELETE FROM tool_calls WHERE session_id = ?', [sessionId]);
     this.db.run('DELETE FROM session_stats WHERE session_id = ?', [sessionId]);
+    this.markDirty();
+  }
+
+  /**
+   * Delete all data for a single provider (CLAUDE-PROVIDER-PLAN.md §15 #10).
+   * Children are deleted strictly before sessions so each `session_id IN (... WHERE
+   * provider=?)` subquery still resolves. The global `model_billing` table is shared
+   * across providers and intentionally left untouched.
+   */
+  clearProvider(provider: ProviderId): void {
+    const sub = '(SELECT id FROM sessions WHERE provider = ?)';
+    this.db.run(`DELETE FROM llm_requests WHERE session_id IN ${sub}`, [provider]);
+    this.db.run(`DELETE FROM user_messages WHERE session_id IN ${sub}`, [provider]);
+    this.db.run(`DELETE FROM tool_calls WHERE session_id IN ${sub}`, [provider]);
+    this.db.run(`DELETE FROM session_stats WHERE session_id IN ${sub}`, [provider]);
+    this.db.run('DELETE FROM sessions WHERE provider = ?', [provider]);
     this.markDirty();
   }
 
@@ -355,12 +421,19 @@ export class TrackerDatabase {
    * These are candidates for enrichment from the prompt export.
    */
   getRequestsWithoutCachedTokens(startMs: number, endMs: number): LLMRequestRecord[] {
+    // Tier-3 prompt-export enrichment is Copilot-only. The `s.provider = 'copilot'`
+    // predicate is LOAD-BEARING (CLAUDE-PROVIDER-PLAN.md §15 #7): the prompt-export
+    // matcher keys only on model+tokens+timestamp (no provider dimension), and a
+    // zero-cache Claude row stored with source 'unknown' would otherwise be a
+    // candidate and could be cross-matched against Copilot data. Do not rely on the
+    // source-string exclusion alone.
     return this.queryRows(
       `SELECT lr.*
        FROM llm_requests lr
        JOIN sessions s ON s.id = lr.session_id
        WHERE lr.timestamp >= ? AND lr.timestamp < ?
          AND lr.cached_input_tokens = 0
+         AND s.provider = 'copilot'
          AND COALESCE(s.data_source, 'jsonl') != 'otel'
          AND COALESCE(lr.cached_input_tokens_source, 'unknown') NOT IN ('otel', 'prompt_export', 'jsonl')
        ORDER BY lr.timestamp ASC`,
@@ -448,9 +521,9 @@ export class TrackerDatabase {
     return r[0].values.map(row => row[0] as string);
   }
 
-  getSessionsWithStats(dateFrom?: number, dateTo?: number): (SessionInfo & SessionStats)[] {
+  getSessionsWithStats(dateFrom?: number, dateTo?: number, provider?: ProviderId): (SessionInfo & SessionStats)[] {
     let sql = `SELECT s.id, s.workspace_id, s.dir_path, s.start_time, s.end_time, s.copilot_version, s.vscode_version,
-       s.repository, s.branch, s.cwd, s.agent_name, s.agent_description, s.data_source,
+       s.repository, s.branch, s.cwd, s.agent_name, s.agent_description, s.data_source, s.provider,
        ss.total_input_tokens, ss.total_output_tokens, ss.total_tokens, ss.weighted_cost,
        ss.llm_request_count, ss.user_message_count, ss.tool_call_count, ss.error_count,
        ss.turn_count, ss.subagent_count, ss.avg_tokens_per_request, ss.avg_ttft,
@@ -460,12 +533,16 @@ export class TrackerDatabase {
       ss.pricing_table_version, ss.cost_formula_version
     FROM sessions s LEFT JOIN session_stats ss ON s.id = ss.session_id WHERE 1=1`;
     const params: SqlValue[] = [];
+    if (provider !== undefined) { sql += ' AND s.provider = ?'; params.push(provider); }
     if (dateFrom !== undefined || dateTo !== undefined) {
       // Include sessions that have ANY activity (LLM requests) in the date range,
       // not just sessions that started in the range
       sql += ` AND s.id IN (SELECT DISTINCT session_id FROM llm_requests WHERE 1=1`;
       if (dateFrom !== undefined) { sql += ' AND timestamp >= ?'; params.push(dateFrom); }
-      if (dateTo !== undefined) { sql += ' AND timestamp <= ?'; params.push(dateTo); }
+      // Half-open upper bound (< end), matching every cost/stats query so the session
+      // list and the token/cost totals agree on which period a boundary-instant request
+      // belongs to (period bounds are [start, nextStart)).
+      if (dateTo !== undefined) { sql += ' AND timestamp < ?'; params.push(dateTo); }
       sql += ')';
     }
     sql += ' ORDER BY s.start_time DESC';
@@ -476,7 +553,7 @@ export class TrackerDatabase {
   getSessionDetail(sessionId: string): { session: SessionInfo; stats: SessionStats; requests: LLMRequestRecord[]; messages: UserMessageRecord[] } | undefined {
     const rows = this.queryRows(
       `SELECT s.id, s.workspace_id, s.dir_path, s.start_time, s.end_time, s.copilot_version, s.vscode_version,
-       s.repository, s.branch, s.cwd, s.agent_name, s.agent_description, s.data_source,
+       s.repository, s.branch, s.cwd, s.agent_name, s.agent_description, s.data_source, s.provider,
        ss.total_input_tokens, ss.total_output_tokens, ss.total_tokens, ss.weighted_cost,
        ss.llm_request_count, ss.user_message_count, ss.tool_call_count, ss.error_count,
        ss.turn_count, ss.subagent_count, ss.avg_tokens_per_request, ss.avg_ttft,
@@ -510,6 +587,9 @@ export class TrackerDatabase {
       isSubagent: (row.is_subagent as number) === 1,
       toolType: (row.tool_type as string) || undefined,
       toolCallId: (row.tool_call_id as string) || undefined,
+      args: (row.args as string) || undefined,
+      result: (row.result as string) || undefined,
+      errorText: (row.error_text as string) || undefined,
     }));
   }
 
@@ -969,9 +1049,10 @@ export class TrackerDatabase {
     };
   }
 
-  getAggregateStats(dateFrom?: number, dateTo?: number): AggregateStats {
+  getAggregateStats(dateFrom?: number, dateTo?: number, provider?: ProviderId): AggregateStats {
     let where = '';
     const params: SqlValue[] = [];
+    if (provider !== undefined) { where += ' AND lr.provider = ?'; params.push(provider); }
     if (dateFrom !== undefined) { where += ' AND lr.timestamp >= ?'; params.push(dateFrom); }
     if (dateTo !== undefined) { where += ' AND lr.timestamp <= ?'; params.push(dateTo); }
 
@@ -996,8 +1077,9 @@ export class TrackerDatabase {
     // Get message/tool/error counts from sessions that had activity in the range
     let extraWhere = '';
     const extraParams: SqlValue[] = [];
+    if (provider !== undefined) { extraWhere += ' AND s.provider = ?'; extraParams.push(provider); }
     if (dateFrom !== undefined || dateTo !== undefined) {
-      extraWhere = ` AND s.id IN (SELECT DISTINCT session_id FROM llm_requests WHERE 1=1`;
+      extraWhere += ` AND s.id IN (SELECT DISTINCT session_id FROM llm_requests WHERE 1=1`;
       if (dateFrom !== undefined) { extraWhere += ' AND timestamp >= ?'; extraParams.push(dateFrom); }
       if (dateTo !== undefined) { extraWhere += ' AND timestamp <= ?'; extraParams.push(dateTo); }
       extraWhere += ')';
@@ -1026,9 +1108,10 @@ export class TrackerDatabase {
     };
   }
 
-  getDailyStats(dateFrom?: number, dateTo?: number): DailyStats[] {
+  getDailyStats(dateFrom?: number, dateTo?: number, provider?: ProviderId): DailyStats[] {
     let where = '';
     const params: SqlValue[] = [];
+    if (provider !== undefined) { where += ' AND lr.provider = ?'; params.push(provider); }
     if (dateFrom !== undefined) { where += ' AND lr.timestamp >= ?'; params.push(dateFrom); }
     if (dateTo !== undefined) { where += ' AND lr.timestamp <= ?'; params.push(dateTo); }
 
@@ -1059,13 +1142,20 @@ export class TrackerDatabase {
     }));
   }
 
-  getModelStats(startMs?: number, endMs?: number): ModelStats[] {
-    const where = (startMs !== undefined && endMs !== undefined)
-      ? 'WHERE timestamp >= ? AND timestamp < ?'
-      : '';
-    const params: SqlValue[] = (startMs !== undefined && endMs !== undefined) ? [startMs, endMs] : [];
+  getModelStats(startMs?: number, endMs?: number, provider?: ProviderId): ModelStats[] {
+    // NOTE: this query previously had no table alias and used bare `timestamp`.
+    // It now uses `FROM llm_requests lr` + a `WHERE 1=1` scaffold so the provider
+    // predicate composes (CLAUDE-PROVIDER-PLAN.md §15 #6) — appending `lr.provider`
+    // to an alias-less query would throw `no such column`.
+    let where = '';
+    const params: SqlValue[] = [];
+    if (provider !== undefined) { where += ' AND lr.provider = ?'; params.push(provider); }
+    if (startMs !== undefined && endMs !== undefined) {
+      where += ' AND lr.timestamp >= ? AND lr.timestamp < ?';
+      params.push(startMs, endMs);
+    }
     const requests = this.queryRows(
-      `SELECT * FROM llm_requests ${where} ORDER BY timestamp ASC`, params
+      `SELECT lr.* FROM llm_requests lr WHERE 1=1 ${where} ORDER BY lr.timestamp ASC`, params
     ).map(r => mapLLMRequest(r));
     const estimated = estimateSessionCaching(requests).requests;
     const byModel = new Map<string, ModelStats>();
@@ -1080,11 +1170,13 @@ export class TrackerDatabase {
     return Array.from(byModel.values()).sort((a, b) => b.totalTokens - a.totalTokens);
   }
 
-  getTopSessions(limit: number = 10): (SessionStats & { startTime: number })[] {
+  getTopSessions(limit: number = 10, provider?: ProviderId): (SessionStats & { startTime: number })[] {
+    const where = provider !== undefined ? 'WHERE s.provider = ?' : '';
+    const params: SqlValue[] = provider !== undefined ? [provider, limit] : [limit];
     return this.queryRows(
-      `SELECT ss.*, s.start_time FROM session_stats ss
-       JOIN sessions s ON ss.session_id = s.id ORDER BY ss.total_tokens DESC LIMIT ?`,
-      [limit]
+      `SELECT ss.*, s.start_time, s.provider FROM session_stats ss
+       JOIN sessions s ON ss.session_id = s.id ${where} ORDER BY ss.total_tokens DESC LIMIT ?`,
+      params
     ).map(r => ({ ...mapSessionStats(r), startTime: r.start_time as number }));
   }
 
@@ -1095,11 +1187,16 @@ export class TrackerDatabase {
     return rows.length > 0 ? (rows[0].cnt as number) : 0;
   }
 
-  getWorkflowStats(): { toolName: string; count: number; errors: number; avgDuration: number }[] {
+  getWorkflowStats(provider?: ProviderId): { toolName: string; count: number; errors: number; avgDuration: number }[] {
+    // tool_calls has no provider column, so filter via a sessions JOIN.
+    const join = provider !== undefined ? 'JOIN sessions s ON s.id = tc.session_id' : '';
+    const where = provider !== undefined ? 'WHERE s.provider = ?' : '';
+    const params: SqlValue[] = provider !== undefined ? [provider] : [];
     return this.queryRows(
-      `SELECT tool_name, COUNT(*) as count, SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errors,
-       AVG(duration) as avg_duration
-       FROM tool_calls GROUP BY tool_name ORDER BY count DESC`
+      `SELECT tc.tool_name as tool_name, COUNT(*) as count, SUM(CASE WHEN tc.status = 'error' THEN 1 ELSE 0 END) as errors,
+       AVG(tc.duration) as avg_duration
+       FROM tool_calls tc ${join} ${where} GROUP BY tc.tool_name ORDER BY count DESC`,
+      params
     ).map(r => ({
       toolName: r.tool_name as string,
       count: r.count as number,
@@ -1108,11 +1205,14 @@ export class TrackerDatabase {
     }));
   }
 
-  getSubagentStats(): { name: string; count: number; avgTokens: number }[] {
+  getSubagentStats(provider?: ProviderId): { name: string; count: number; avgTokens: number }[] {
+    const providerClause = provider !== undefined ? 'AND provider = ?' : '';
+    const params: SqlValue[] = provider !== undefined ? [provider] : [];
     return this.queryRows(
       `SELECT subagent_name as name, COUNT(*) as count, AVG(input_tokens + output_tokens) as avg_tokens
-       FROM llm_requests WHERE is_subagent = 1 AND subagent_name IS NOT NULL
-       GROUP BY subagent_name ORDER BY count DESC`
+       FROM llm_requests WHERE is_subagent = 1 AND subagent_name IS NOT NULL ${providerClause}
+       GROUP BY subagent_name ORDER BY count DESC`,
+      params
     ).map(r => ({
       name: r.name as string,
       count: r.count as number,
@@ -1124,34 +1224,51 @@ export class TrackerDatabase {
    * Returns distinct UTC calendar months that have llm_request data, newest first.
    * Each entry carries pre-computed epoch-ms start/end boundaries for use in period queries.
    */
-  getAvailableMonths(): { year: number; month: number; label: string; start: number; end: number }[] {
+  getAvailableMonths(provider?: ProviderId, now: number = Date.now()): { year: number; month: number; label: string; start: number; end: number }[] {
+    const providerClause = provider !== undefined ? 'WHERE provider = ?' : '';
+    const params: SqlValue[] = provider !== undefined ? [provider] : [];
     const rows = this.queryRows(`
       SELECT
         CAST(strftime('%Y', timestamp / 1000, 'unixepoch') AS INTEGER) AS year,
         CAST(strftime('%m', timestamp / 1000, 'unixepoch') AS INTEGER) AS month
       FROM llm_requests
+      ${providerClause}
       GROUP BY year, month
       ORDER BY year DESC, month DESC
-    `);
+    `, params);
     const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-    return rows.map(r => {
-      const year = r.year as number;
-      const month = r.month as number;
-      return {
-        year,
-        month,
-        label: `${MONTH_NAMES[month - 1]} ${year}`,
-        start: Date.UTC(year, month - 1, 1),
-        end: Date.UTC(year, month, 1),
-      };
+    const mk = (year: number, month: number) => ({
+      year, month,
+      label: `${MONTH_NAMES[month - 1]} ${year}`,
+      start: Date.UTC(year, month - 1, 1),
+      end: Date.UTC(year, month, 1),
     });
+    const months = rows.map(r => mk(r.year as number, r.month as number));
+
+    // Always include the CURRENT calendar month (UTC, matching getBillingPeriodBounds),
+    // even when it has no rows yet. The billing views treat index 0 as the live billing
+    // period; without this, on a month with no activity (e.g. the 1st) the newest
+    // data-month would sit at index 0, be treated as "current", and get billed over the
+    // empty current range → $0 for the last real month + the current month unselectable.
+    const d = new Date(now);
+    const cy = d.getUTCFullYear();
+    const cmonth = d.getUTCMonth() + 1; // 1-based
+    const key = (y: number, m: number) => y * 12 + (m - 1);
+    if (months.length === 0 || key(cy, cmonth) > key(months[0].year, months[0].month)) {
+      months.unshift(mk(cy, cmonth)); // current month is newest → index 0
+    }
+    return months;
   }
 
-  getWorkflowSummary(startMs?: number, endMs?: number): { totalToolCalls: number; totalSubagents: number; totalTurns: number; totalErrors: number; avgTurnsPerMessage: number; avgToolsPerTurn: number } {
+  getWorkflowSummary(startMs?: number, endMs?: number, provider?: ProviderId): { totalToolCalls: number; totalSubagents: number; totalTurns: number; totalErrors: number; avgTurnsPerMessage: number; avgToolsPerTurn: number } {
     const hasPeriod = startMs !== undefined && endMs !== undefined;
     const join  = hasPeriod ? 'JOIN sessions s ON ss.session_id = s.id' : '';
-    const where = hasPeriod ? 'WHERE s.start_time >= ? AND s.start_time < ?' : '';
-    const params: SqlValue[] = hasPeriod ? [startMs!, endMs!] : [];
+    // session_stats carries its own provider column, so no JOIN is needed to filter it.
+    const conds: string[] = [];
+    const params: SqlValue[] = [];
+    if (hasPeriod) { conds.push('s.start_time >= ? AND s.start_time < ?'); params.push(startMs!, endMs!); }
+    if (provider !== undefined) { conds.push('ss.provider = ?'); params.push(provider); }
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
     const rows = this.queryRows(
       `SELECT SUM(ss.tool_call_count) as total_tools, SUM(ss.subagent_count) as total_subagents,
        SUM(ss.turn_count) as total_turns, SUM(ss.error_count) as total_errors,
@@ -1179,14 +1296,20 @@ export class TrackerDatabase {
 
   // ---- Billing period queries ---------------------------------------------
 
-  getLLMRequestsInPeriod(startMs: number, endMs: number): LLMRequestRecord[] {
+  getLLMRequestsInPeriod(startMs: number, endMs: number, provider?: ProviderId): LLMRequestRecord[] {
+    // No sessions JOIN: llm_requests carries its own provider column (migration v9),
+    // so the JOIN adds nothing for filtering and — being INNER — could silently drop
+    // an llm_request whose session row is missing, diverging from getModelStats
+    // (which scans llm_requests directly). Filter on lr.provider alone.
+    const providerClause = provider !== undefined ? 'AND lr.provider = ?' : '';
+    const params: SqlValue[] = provider !== undefined ? [startMs, endMs, provider] : [startMs, endMs];
     return this.queryRows(
       `SELECT lr.*
        FROM llm_requests lr
-       JOIN sessions s ON lr.session_id = s.id
        WHERE lr.timestamp >= ? AND lr.timestamp < ?
+       ${providerClause}
        ORDER BY lr.timestamp ASC`,
-      [startMs, endMs]
+      params
     ).map(r => mapLLMRequest(r));
   }
 
@@ -1198,26 +1321,40 @@ export class TrackerDatabase {
    *   2. Fallback: the first non-subagent llm_request in the same session whose
    *      timestamp is >= the user message timestamp and < the next user message.
    */
-  getUserPromptModelsInPeriod(startMs: number, endMs: number): { sessionId: string; timestamp: number; model: string }[] {
+  getUserPromptModelsInPeriod(startMs: number, endMs: number, provider?: ProviderId): { sessionId: string; timestamp: number; model: string }[] {
+    // user_messages has no provider column (CLAUDE-PROVIDER-PLAN.md §15 #2), so filter
+    // via a sessions JOIN rather than the (unbuildable) lr.provider predicate.
+    const providerClause = provider !== undefined ? 'AND s.provider = ?' : '';
+    const params: SqlValue[] = provider !== undefined ? [startMs, endMs, provider] : [startMs, endMs];
     const messages = this.queryRows(
-      `SELECT session_id, span_id, timestamp
-       FROM user_messages
-       WHERE timestamp >= ? AND timestamp < ?
-       ORDER BY session_id, timestamp`,
-      [startMs, endMs]
+      `SELECT um.session_id as session_id, um.span_id as span_id, um.timestamp as timestamp
+       FROM user_messages um
+       JOIN sessions s ON s.id = um.session_id
+       WHERE um.timestamp >= ? AND um.timestamp < ?
+       ${providerClause}
+       ORDER BY um.session_id, um.timestamp`,
+      params
     );
     const out: { sessionId: string; timestamp: number; model: string }[] = [];
-    // Group next-msg lookup
+    // Group next-msg lookup. `messages` is ordered by (session_id, timestamp) and each
+    // session's timestamps are pushed in that same order, so the array index is the
+    // message's position within its session.
     const nextMsgInSession = new Map<string, number[]>();
     for (const m of messages) {
       const sid = m.session_id as string;
       if (!nextMsgInSession.has(sid)) { nextMsgInSession.set(sid, []); }
       nextMsgInSession.get(sid)!.push(m.timestamp as number);
     }
+    // Per-session cursor so we advance by POSITION, not by timestamp value. indexOf(ts)
+    // would collapse two prompts sharing an identical millisecond timestamp onto the
+    // same window; a positional cursor gives each its own upper bound.
+    const sessionCursor = new Map<string, number>();
     for (const m of messages) {
       const sid = m.session_id as string;
       const span = m.span_id as string;
       const ts = m.timestamp as number;
+      const pos = sessionCursor.get(sid) ?? 0;
+      sessionCursor.set(sid, pos + 1);
 
       // 1. parent-span match
       let model = '';
@@ -1233,8 +1370,7 @@ export class TrackerDatabase {
       // 2. timestamp window fallback
       if (!model) {
         const sessTs = nextMsgInSession.get(sid)!;
-        const idx = sessTs.indexOf(ts);
-        const upper = idx >= 0 && idx + 1 < sessTs.length ? sessTs[idx + 1] : Number.MAX_SAFE_INTEGER;
+        const upper = pos + 1 < sessTs.length ? sessTs[pos + 1] : Number.MAX_SAFE_INTEGER;
         const r2 = this.queryRows(
           `SELECT model FROM llm_requests
            WHERE session_id = ? AND is_subagent = 0
@@ -1313,6 +1449,7 @@ function mapSessionInfo(row: Record<string, unknown>): SessionInfo {
     endTime: (row.end_time as number) || 0,
     copilotVersion: (row.copilot_version as string) || '',
     vscodeVersion: (row.vscode_version as string) || '',
+    provider: ((row.provider as ProviderId) || 'copilot'),
     repository: (row.repository as string) || undefined,
     branch: (row.branch as string) || undefined,
     cwd: (row.cwd as string) || undefined,
@@ -1325,6 +1462,7 @@ function mapSessionInfo(row: Record<string, unknown>): SessionInfo {
 function mapSessionStats(row: Record<string, unknown>): SessionStats {
   return {
     sessionId: (row.session_id as string) || (row.id as string) || '',
+    provider: ((row.provider as ProviderId) || 'copilot'),
     totalInputTokens: (row.total_input_tokens as number) || 0,
     totalOutputTokens: (row.total_output_tokens as number) || 0,
     totalTokens: (row.total_tokens as number) || 0,
@@ -1360,6 +1498,7 @@ function mapSessionWithStats(row: Record<string, unknown>): SessionInfo & Sessio
 function mapLLMRequest(row: Record<string, unknown>): LLMRequestRecord {
   return {
     sessionId: row.session_id as string,
+    provider: ((row.provider as ProviderId) || 'copilot'),
     spanId: (row.span_id as string) || '',
     parentSpanId: row.parent_span_id as string | undefined,
     timestamp: row.timestamp as number,
@@ -1369,6 +1508,7 @@ function mapLLMRequest(row: Record<string, unknown>): LLMRequestRecord {
     outputTokens: row.output_tokens as number,
     cachedInputTokens: (row.cached_input_tokens as number) || 0,
     cacheWriteTokens: (row.cache_write_tokens as number) || 0,
+    cacheWrite1hTokens: (row.cache_write_1h_tokens as number) || 0,
     totalTokens: (row.input_tokens as number) + (row.output_tokens as number),
     ttft: row.ttft as number,
     maxTokens: row.max_tokens as number,
@@ -1391,6 +1531,8 @@ function mapLLMRequest(row: Record<string, unknown>): LLMRequestRecord {
     tokenAuditFlags: parseJsonArray(row.token_audit_flags as string),
     directCredits: row.direct_credits != null ? (row.direct_credits as number) : undefined,
     directCreditsSource: (row.direct_credits_source as TokenDataSource) || undefined,
+    outputText: (row.output_text as string) || undefined,
+    reasoningText: (row.reasoning_text as string) || undefined,
   };
 }
 
@@ -1401,6 +1543,7 @@ function mapUserMessage(row: Record<string, unknown>): UserMessageRecord {
     timestamp: row.timestamp as number,
     contentLength: row.content_length as number,
     contentPreview: row.content_preview as string,
+    contentFull: (row.content_full as string) || undefined,
   };
 }
 
@@ -1427,7 +1570,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   file_mtime INTEGER, parsed_at INTEGER,
   repository TEXT, branch TEXT, cwd TEXT,
   agent_name TEXT, agent_description TEXT,
-  data_source TEXT DEFAULT 'jsonl'
+  data_source TEXT DEFAULT 'jsonl',
+  provider TEXT DEFAULT 'copilot'
 );
 CREATE TABLE IF NOT EXISTS llm_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1437,6 +1581,7 @@ CREATE TABLE IF NOT EXISTS llm_requests (
   output_tokens INTEGER DEFAULT 0,
   cached_input_tokens INTEGER DEFAULT 0,
   cache_write_tokens INTEGER DEFAULT 0,
+  cache_write_1h_tokens INTEGER DEFAULT 0,
   ttft INTEGER, max_tokens INTEGER,
   status TEXT, error TEXT, is_subagent INTEGER DEFAULT 0,
   subagent_name TEXT, user_request_preview TEXT,
@@ -1451,20 +1596,25 @@ CREATE TABLE IF NOT EXISTS llm_requests (
   cache_match_confidence REAL,
   token_audit_flags TEXT DEFAULT '[]',
   direct_credits REAL,
-  direct_credits_source TEXT
+  direct_credits_source TEXT,
+  provider TEXT DEFAULT 'copilot',
+  output_text TEXT,
+  reasoning_text TEXT
 );
 CREATE TABLE IF NOT EXISTS user_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL REFERENCES sessions(id),
   span_id TEXT, timestamp INTEGER NOT NULL,
-  content_length INTEGER, content_preview TEXT
+  content_length INTEGER, content_preview TEXT,
+  content_full TEXT
 );
 CREATE TABLE IF NOT EXISTS tool_calls (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL REFERENCES sessions(id),
   span_id TEXT, parent_span_id TEXT, timestamp INTEGER NOT NULL,
   duration INTEGER, tool_name TEXT, status TEXT, is_subagent INTEGER DEFAULT 0,
-  tool_type TEXT, tool_call_id TEXT
+  tool_type TEXT, tool_call_id TEXT,
+  args TEXT, result TEXT, error_text TEXT
 );
 CREATE TABLE IF NOT EXISTS model_billing (
   model_id TEXT PRIMARY KEY, name TEXT, vendor TEXT,
@@ -1488,11 +1638,13 @@ CREATE TABLE IF NOT EXISTS session_stats (
   cost_audit_state TEXT DEFAULT 'estimated',
   cost_audit_flags TEXT DEFAULT '[]',
   pricing_table_version INTEGER DEFAULT 0,
-  cost_formula_version INTEGER DEFAULT 0
+  cost_formula_version INTEGER DEFAULT 0,
+  provider TEXT DEFAULT 'copilot'
 );
 CREATE INDEX IF NOT EXISTS idx_llm_session ON llm_requests(session_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_session_span_unique ON llm_requests(session_id, span_id) WHERE span_id IS NOT NULL AND span_id != '';
 CREATE INDEX IF NOT EXISTS idx_llm_timestamp ON llm_requests(timestamp);
+CREATE INDEX IF NOT EXISTS idx_llm_provider ON llm_requests(provider);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON user_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_tools_session ON tool_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time);

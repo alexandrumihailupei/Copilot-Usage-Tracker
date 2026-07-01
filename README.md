@@ -1,21 +1,29 @@
-# Copilot Usage Tracker
+# AI Usage Tracker
 
-A VS Code extension that analyzes GitHub Copilot Chat token usage, session statistics, and cost insights from local debug logs. Track how many tokens you consume, estimate costs against your plan quota, and identify usage patterns — all without sending data anywhere.
+A VS Code extension that analyzes **GitHub Copilot** and **Claude Code** token usage, session statistics, and cost insights from local logs. Track how many tokens you consume, estimate costs against your plan quota, and drill into individual requests â€” all without sending data anywhere. Switch between providers with a single click.
 
 ## Features
 
-- **Token Usage Dashboard** — View input, output, cached, and reasoning tokens per session, model, or time period
-- **Cost & Credit Estimation** — Calculates AI premium credits consumed based on your Copilot plan (Free, Pro, Pro+, Business, Enterprise)
-- **Session Explorer** — Browse all Copilot Chat conversations in a sidebar tree view, grouped by date, workspace, or model
-- **Multi-Source Data** — Combines OTel agent traces (high-fidelity cached/reasoning tokens), JSONL debug logs, and prompt export data for maximum accuracy
-- **Subagent Tracking** — Rolls in token usage from spawned subagents (e.g., Explore) for true total cost per conversation
-- **Offline & Private** — All data stays local. Reads existing VS Code log files; never intercepts traffic or phones home
+- **Two providers, one view** â€” Track GitHub Copilot Chat and Claude Code side by side; toggle the active provider with the **Switch Provider** button (orange accent for Claude, blue for Copilot).
+- **Token Usage Dashboard** â€” Input, output, cached (read), and cache-write tokens per session, model, or billing period, plus a "fresh in" figure that excludes the re-read cached prefix so it reads comparably to each tool's own usage panel.
+- **Cost estimation** â€”
+  - *Copilot:* AI premium credits / USD against your plan quota (Free, Pro, Pro+, Business, Enterprise), using API-reported credits when available and a per-token model otherwise.
+  - *Claude:* USD at Anthropic list prices, with correct cache-read (0.1Ã—) and cache-write pricing including the **1-hour vs 5-minute TTL** distinction.
+- **Session Explorer** â€” Browse every conversation in a sidebar tree, grouped by date, workspace, or model, with an expandable per-request timeline (prompt, output, tool inputs/results).
+- **Accurate request accounting** â€” For Claude, one API response is de-duplicated to a single request by `requestId`, and deeply-nested subagent/workflow transcripts are fully rolled into the parent session.
+- **Billing-period navigation** â€” Step through months or view all-time totals; the current billing period is always selectable.
+- **Offline & private** â€” All processing is local. The extension only reads existing log files; it never intercepts traffic or phones home.
 
-## Prerequisites
+## Supported providers
 
-### Required VS Code Settings
+| Provider | Source it reads | Setup required |
+|----------|-----------------|----------------|
+| **GitHub Copilot** | OTel agent-traces DB + JSONL debug logs in VS Code `workspaceStorage`, plus prompt-export enrichment | Enable the two debug-log settings below |
+| **Claude Code** | Session transcripts under `~/.claude/projects/<project>/<sessionId>.jsonl` (and nested subagent/workflow transcripts) | None â€” discovered automatically |
 
-You **must** enable these two settings in your VS Code `settings.json` for the extension to access Copilot Chat debug log files:
+## Prerequisites (GitHub Copilot only)
+
+To let the extension read Copilot Chat debug logs, enable these in your VS Code `settings.json`:
 
 ```jsonc
 {
@@ -26,10 +34,10 @@ You **must** enable these two settings in your VS Code `settings.json` for the e
 
 | Setting | Purpose |
 |---------|---------|
-| `github.copilot.chat.agentDebugLog.enabled` | Enables the agent debug logs and the `/troubleshoot` slash command for inspecting chat sessions |
-| `github.copilot.chat.agentDebugLog.fileLogging.enabled` | Enables file logging, which writes debug events to JSONL files on disk — these are the files this extension reads |
+| `github.copilot.chat.agentDebugLog.enabled` | Enables agent debug logs and the `/troubleshoot` command |
+| `github.copilot.chat.agentDebugLog.fileLogging.enabled` | Writes debug events to JSONL files on disk â€” the files this extension reads |
 
-After enabling these settings, restart VS Code for them to take effect.
+Restart VS Code after enabling them. **Claude Code requires no setup** â€” it writes transcripts to `~/.claude/projects` automatically.
 
 ## Installation
 
@@ -42,47 +50,35 @@ After enabling these settings, restart VS Code for them to take effect.
    ```bash
    npm run compile
    ```
-4. Press `F5` in VS Code to launch the Extension Development Host, or package it as a `.vsix` file:
+4. Press `F5` in VS Code to launch the Extension Development Host, or package a `.vsix`:
    ```bash
    npm run package
    ```
-
-   > **Note:** `vsce package` requires a `repository` field in `package.json` or it will fail with an error. Add the block below as a top-level key (alongside `"name"`, `"version"`, etc.) — the URL doesn't need to point to a real repository:
-   > ```json
-   > {
-   >   "name": "copilot-usage-tracker",
-   >   "version": "0.1.0",
-   >   "repository": {
-   >     "type": "git",
-   >     "url": "https://github.com/placeholder/placeholder"
-   >   },
-   >   ...
-   > }
-   > ```
-   > This field is required by `vsce` to generate the `.vsix` package metadata. Without it, packaging will be aborted even if the code compiles fine.
-
-5. Install the generated `.vsix` file in VS Code:
+   > `vsce package` requires the `repository` field in `package.json`.
+5. Install the generated `.vsix`:
    - Open the **Extensions** tab (`Ctrl+Shift+X`)
-   - Click the `...` menu (top-right of the Extensions panel)
-   - Select **Install from VSIX...**
-   - Choose the generated `.vsix` file
+   - Click the `...` menu â†’ **Install from VSIX...** â†’ choose the file
 
 ## Usage
 
-1. Open the **Copilot Usage** view in the Activity Bar (left sidebar)
-2. The extension automatically discovers debug logs from all your VS Code workspaces
-3. Click **Refresh** to scan for new sessions
-4. Open the **Dashboard** (command: `Copilot Usage: Open Copilot Usage Dashboard`) for detailed charts and breakdowns
+1. Open the **AI Usage** view in the Activity Bar (left sidebar).
+2. The extension automatically discovers Copilot logs (all workspaces) and Claude Code transcripts.
+3. Use the **Switch Provider** button (view title bar) to toggle between Copilot and Claude.
+4. Click **Refresh** to scan for new sessions.
+5. Open the **Dashboard** (`AI Usage: Open AI Usage Dashboard`) for charts, per-model breakdowns, and the expandable request timeline.
+6. Use the billing-period picker to view a specific month or all-time totals.
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `Copilot Usage: Open Copilot Usage Dashboard` | Opens the webview dashboard with full statistics |
-| `Copilot Usage: Refresh Copilot Usage Data` | Re-scans log directories for new sessions |
-| `Copilot Usage: Add Log Directory` | Manually add a directory to scan for debug logs |
-| `Copilot Usage: Clear Cache` | Clears the local SQLite cache |
-| `Copilot Usage: Open Raw Log` | Opens the raw JSONL file for a selected session |
+| `AI Usage: Open AI Usage Dashboard` | Opens the webview dashboard with full statistics |
+| `AI Usage: Switch Provider (Copilot / Claude)` | Toggles the active provider |
+| `AI Usage: Refresh Usage Data` | Re-scans logs/transcripts for new sessions |
+| `AI Usage: Add Log Directory` | Manually add a directory to scan for Copilot debug logs |
+| `AI Usage: Select Billing Period` | Pick a month or all-time |
+| `AI Usage: Clear Cache` | Clears cached data for the active provider |
+| `AI Usage: Open Raw Log` | Opens the raw JSONL file for a selected session |
 
 ## Configuration
 
@@ -90,27 +86,34 @@ After enabling these settings, restart VS Code for them to take effect.
 |---------|---------|-------------|
 | `copilotUsageTracker.logDirectories` | `[]` | Additional directories to scan for Copilot Chat debug logs |
 | `copilotUsageTracker.autoScanWorkspaceStorage` | `true` | Automatically discover logs in VS Code workspaceStorage folders |
-| `copilotUsageTracker.parseSubagentLogs` | `true` | Recursively parse subagent JSONL files for full token accounting |
-| `copilotUsageTracker.defaultGroupBy` | `"date"` | Default session grouping in the sidebar (`date`, `workspace`, or `model`) |
-| `copilotUsageTracker.plan` | `"business"` | Your GitHub Copilot plan — determines monthly quota for billing display |
+| `copilotUsageTracker.parseSubagentLogs` | `true` | Recursively parse subagent transcripts for full token accounting |
+| `copilotUsageTracker.defaultGroupBy` | `"date"` | Default session grouping (`date`, `workspace`, or `model`) |
+| `copilotUsageTracker.plan` | `"business"` | Your GitHub Copilot plan â€” determines monthly quota for billing display |
+| `copilotUsageTracker.claudeProjectsDirectory` | `"~/.claude/projects"` | Root directory containing Claude Code transcripts |
+| `copilotUsageTracker.claudeCostBasis` | `"api"` | How to present Claude cost: `api` = USD at Anthropic list prices; `subscription` = API-equivalent (included in your Claude plan) |
 
-## How It Works
+## How it works
 
-The extension reads **existing local files** that VS Code writes during Copilot Chat sessions:
+The extension reads **existing local files** written by each tool:
 
-1. **OTel Agent Traces DB** (Tier 1) — SQLite database with OpenTelemetry spans, providing cached tokens, reasoning tokens, and trace hierarchy
-2. **JSONL Debug Logs** (Tier 2) — Line-delimited JSON event logs in `workspaceStorage/*/GitHub.copilot-chat/debug-logs/`
-3. **Prompt Export** (Tier 3) — Cached token enrichment via Copilot's internal export command
+**GitHub Copilot**
+1. **OTel Agent Traces DB** (Tier 1) â€” SQLite spans with cached/reasoning tokens and trace hierarchy
+2. **JSONL Debug Logs** (Tier 2) â€” event logs in `workspaceStorage/*/GitHub.copilot-chat/debug-logs/`
+3. **Prompt Export** (Tier 3) â€” cached-token enrichment via Copilot's internal export
 
-See [DATA-COLLECTION.md](DATA-COLLECTION.md) for full details on what is read and how.  
-See [COST-CALCULATION.md](COST-CALCULATION.md) for the billing/credit calculation methodology.
+**Claude Code**
+- Reads `~/.claude/projects/<project>/<sessionId>.jsonl` and its nested subagent/workflow transcripts. One API response spans several transcript lines sharing a `requestId`; these are de-duplicated to a single request so tokens are counted once. Cache-read, 5-minute cache-write, and 1-hour cache-write tokens are priced separately.
 
-## Data Privacy
+Costs are computed by a shared per-token engine keyed off the **provider** (not the model name), so a Claude model run *through* Copilot is still billed under Copilot's rules.
 
-- **No network calls** — The extension never sends data to any server
-- **Read-only** — It only reads existing log files; never modifies them
-- **Local storage** — Session statistics are cached in a local SQLite database (`.db` file in extension storage)
-- **Message previews** — Only the first 200 characters of your messages are stored for context; full content is never persisted
+See [DATA-COLLECTION.md](DATA-COLLECTION.md) and [COST-CALCULATION.md](COST-CALCULATION.md) for the Copilot data-collection and billing methodology.
+
+## Data privacy
+
+- **No network calls** â€” The extension never sends data to any server.
+- **Read-only sources** â€” It only reads existing log/transcript files; it never modifies them.
+- **Local storage only** â€” All statistics are cached in a local SQLite database in the extension's storage folder.
+- **Full content is stored locally** â€” To power the expandable request timeline, the local database persists full message text, assistant output, and tool inputs/results (capped at 16 KB per field). This data stays on your machine and is removed by **Clear Cache**. If you prefer not to store it, avoid enabling this build on shared machines.
 
 ## Development
 

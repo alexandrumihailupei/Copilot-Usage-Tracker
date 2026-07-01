@@ -1,8 +1,8 @@
 {
   "name": "copilot-usage-tracker",
-  "displayName": "Copilot Usage Tracker",
-  "description": "Analyze GitHub Copilot Chat token usage, session statistics, and workflow-efficiency insights from local debug logs.",
-  "version": "0.1.0",
+  "displayName": "AI Usage Tracker",
+  "description": "Analyze AI coding-assistant token usage, session statistics, and workflow-efficiency insights from local logs (GitHub Copilot and Claude Code).",
+  "version": "0.2.7",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -21,62 +21,68 @@
     "commands": [
       {
         "command": "copilotUsageTracker.openDashboard",
-        "title": "Open Copilot Usage Dashboard",
-        "category": "Copilot Usage"
+        "title": "Open AI Usage Dashboard",
+        "category": "AI Usage"
       },
       {
         "command": "copilotUsageTracker.refresh",
-        "title": "Refresh Copilot Usage Data",
-        "category": "Copilot Usage",
+        "title": "Refresh Usage Data",
+        "category": "AI Usage",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "copilotUsageTracker.toggleProvider",
+        "title": "Switch Provider (Copilot / Claude)",
+        "category": "AI Usage",
+        "icon": "$(arrow-swap)"
       },
       {
         "command": "copilotUsageTracker.addLogDirectory",
         "title": "Add Log Directory",
-        "category": "Copilot Usage",
+        "category": "AI Usage",
         "icon": "$(add)"
       },
       {
         "command": "copilotUsageTracker.clearCache",
         "title": "Clear Cache",
-        "category": "Copilot Usage"
+        "category": "AI Usage"
       },
       {
         "command": "copilotUsageTracker.openRawLog",
         "title": "Open Raw Log",
-        "category": "Copilot Usage"
+        "category": "AI Usage"
       },
       {
         "command": "copilotUsageTracker.stats.prevMonth",
         "title": "Previous Month (older)",
-        "category": "Copilot Usage"
+        "category": "AI Usage"
       },
       {
         "command": "copilotUsageTracker.stats.nextMonth",
         "title": "Next Month (newer)",
-        "category": "Copilot Usage"
+        "category": "AI Usage"
       },
       {
         "command": "copilotUsageTracker.stats.allTime",
         "title": "All Time Stats",
-        "category": "Copilot Usage"
+        "category": "AI Usage"
       },
       {
         "command": "copilotUsageTracker.stats.currentMonth",
         "title": "Current Month Stats",
-        "category": "Copilot Usage"
+        "category": "AI Usage"
       },
       {
         "command": "copilotUsageTracker.stats.selectMonth",
         "title": "Select Billing Period",
-        "category": "Copilot Usage"
+        "category": "AI Usage"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
           "id": "copilotUsageTracker",
-          "title": "Copilot Usage",
+          "title": "AI Usage",
           "icon": "media/icons/activity-bar.svg"
         }
       ]
@@ -96,14 +102,24 @@
     "menus": {
       "view/title": [
         {
+          "command": "copilotUsageTracker.toggleProvider",
+          "when": "view == copilotUsageTracker.sessions",
+          "group": "navigation@1"
+        },
+        {
           "command": "copilotUsageTracker.refresh",
           "when": "view == copilotUsageTracker.sessions",
-          "group": "navigation"
+          "group": "navigation@2"
         },
         {
           "command": "copilotUsageTracker.addLogDirectory",
           "when": "view == copilotUsageTracker.sessions",
-          "group": "navigation"
+          "group": "navigation@3"
+        },
+        {
+          "command": "copilotUsageTracker.toggleProvider",
+          "when": "view == copilotUsageTracker.quickStats",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [
@@ -114,7 +130,7 @@
       ]
     },
     "configuration": {
-      "title": "Copilot Usage Tracker",
+      "title": "AI Usage Tracker",
       "properties": {
         "copilotUsageTracker.logDirectories": {
           "type": "array",
@@ -155,6 +171,20 @@
           ],
           "default": "business",
           "description": "Your GitHub Copilot plan (determines monthly quota for billing display)."
+        },
+        "copilotUsageTracker.claudeProjectsDirectory": {
+          "type": "string",
+          "default": "~/.claude/projects",
+          "description": "Root directory containing Claude Code transcripts (one <sessionId>.jsonl per session)."
+        },
+        "copilotUsageTracker.claudeCostBasis": {
+          "type": "string",
+          "enum": [
+            "api",
+            "subscription"
+          ],
+          "default": "api",
+          "description": "How to present Claude cost: 'api' = USD at Anthropic list prices; 'subscription' = API-equivalent (included in your Claude plan)."
         }
       }
     }

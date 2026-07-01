@@ -2,9 +2,17 @@
 src/**
 test/**
 out/**
+.test-out/**
+scratch/**
+.claude/**
 node_modules/**
 !node_modules/sql.js/**
 .gitignore
 tsconfig.json
 webpack.config.js
 **/*.map
+debug.log
+*.vsix
+CLAUDE-PROVIDER-PLAN.md
+COST-CALCULATION.md
+DATA-COLLECTION.md

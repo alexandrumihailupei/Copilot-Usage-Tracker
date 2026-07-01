@@ -1,12 +1,11 @@
 import * as vscode from 'vscode';
 import { TrackerDatabase } from './database';
-import { discoverSessions } from '../core/logDiscovery';
-import { buildSession } from '../core/sessionBuilder';
 import { computeSessionStats } from '../stats/tokenStats';
 import { getConfig } from '../config';
 import { exportAndParsePromptLogs, buildMatchIndex } from '../core/promptExportReader';
 import { exportAndReadOtelDB, mapOtelToParsedSession } from '../core/otelReader';
 import { ingestJsonlSession } from './ingest';
+import { PROVIDERS } from '../core/providers';
 
 export interface SyncResult {
   totalDiscovered: number;
@@ -119,23 +118,35 @@ async function syncAllInternal(
     }
   }
 
-  // ---- Tier 2: JSONL logs (skip sessions already covered by OTel) ----------
-  const discovered = discoverSessions(
-    config.logDirectories,
-    config.autoScanWorkspaceStorage
-  );
-  result.totalDiscovered = discovered.length + result.otelSessions;
+  // ---- Tier 2: provider adapters (JSONL/transcript) ------------------------
+  // Each adapter (Copilot, Claude) discovers sessions on disk and parses them to
+  // the shared ParsedSession shape. OTel-covered Copilot sessions are skipped
+  // (richer data wins). Discovery is read-only and tolerant of missing roots.
+  const discoveredPairs: { adapter: typeof PROVIDERS[number]; disc: ReturnType<typeof PROVIDERS[number]['discover']>[number] }[] = [];
+  for (const adapter of PROVIDERS) {
+    let found: ReturnType<typeof adapter.discover>;
+    try {
+      found = adapter.discover(config);
+    } catch (err) {
+      console.warn(`[AIUsageTracker] ${adapter.id} discovery failed:`, err);
+      continue;
+    }
+    for (const disc of found) {
+      discoveredPairs.push({ adapter, disc });
+    }
+  }
+  result.totalDiscovered = discoveredPairs.length + result.otelSessions;
 
-  const incrementPer = discovered.length > 0 ? 80 / discovered.length : 80;
+  const incrementPer = discoveredPairs.length > 0 ? 80 / discoveredPairs.length : 80;
 
-  for (const disc of discovered) {
-    // Skip if already ingested from OTel (richer data wins)
-    if (otelSessionIds.has(disc.sessionId)) {
+  for (const { adapter, disc } of discoveredPairs) {
+    // Copilot sessions already ingested from OTel (richer) win.
+    if (adapter.id === 'copilot' && otelSessionIds.has(disc.sessionId)) {
       result.skipped++;
       continue;
     }
 
-    progress?.report({ message: `Parsing ${disc.sessionId.substring(0, 8)}...`, increment: incrementPer });
+    progress?.report({ message: `Parsing ${disc.sessionId.substring(0, 14)}...`, increment: incrementPer });
 
     const existingMtime = db.getSessionMtime(disc.sessionId);
     if (existingMtime !== undefined && existingMtime >= disc.mtimeMs) {
@@ -144,15 +155,22 @@ async function syncAllInternal(
     }
 
     try {
-      const parsed = await buildSession(disc, config.parseSubagentLogs);
+      const parsed = await adapter.parse(disc, config.parseSubagentLogs);
       if (!parsed || parsed.llmRequests.length === 0) {
+        // Clear any stale rows from a prior non-empty parse before recording the
+        // session as empty, so orphaned requests don't linger (§15 #11b).
+        if (existingMtime !== undefined) { db.deleteSessionData(disc.sessionId); }
         if (parsed?.session) {
+          parsed.session.provider = adapter.id;
           db.upsertSession(parsed.session, disc.mtimeMs);
         }
         result.emptyCount++;
         continue;
       }
 
+      // Invariant (§6): the discovered id, the parsed session id, and every child
+      // record's sessionId must all agree, or mtime-skip / FK joins break.
+      parsed.session.id = disc.sessionId;
       ingestJsonlSession(db, disc, parsed, existingMtime !== undefined);
 
       result.jsonlSessions++;

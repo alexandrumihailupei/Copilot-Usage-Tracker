@@ -1,4 +1,4 @@
-import { CopilotPlan } from '../config';
+import { CopilotPlan, ClaudeCostBasis } from '../config';
 import { TrackerDatabase } from '../db/database';
 import { estimateSessionCaching } from './cacheEstimator';
 
@@ -57,8 +57,9 @@ interface ModelEntry {
   multiplier: number;            // request-based multiplier (paid plans)
   freeMultiplier?: number;       // multiplier on Copilot Free (only if different)
   input: number;                 // $ per 1M input tokens (uncached)
-  cachedInput: number;           // $ per 1M cached input tokens
-  cacheWrite?: number;           // $ per 1M cache-write tokens, when priced separately
+  cachedInput: number;           // $ per 1M cached input tokens (cache read)
+  cacheWrite?: number;           // $ per 1M cache-write tokens (5-min TTL), when priced separately
+  cacheWrite1h?: number;         // $ per 1M cache-write tokens (1-hour TTL); Anthropic = 2x base input
   output: number;                // $ per 1M output tokens
   aliases: string[];
 }
@@ -67,14 +68,16 @@ interface ModelEntry {
 // Multiplier source: docs/copilot/concepts/billing/copilot-requests
 const MODEL_TABLE: ModelEntry[] = [
   // ---- Anthropic ----
-  { id: 'claude-haiku-4.5',  multiplier: 0.33, freeMultiplier: 1, input: 1.00, cachedInput: 0.10, cacheWrite: 1.25, output: 5.00,  aliases: ['claude-haiku-4.5', 'haiku-4.5'] },
-  { id: 'claude-sonnet-4',   multiplier: 1,    input: 3.00, cachedInput: 0.30, cacheWrite: 3.75, output: 15.00, aliases: ['claude-sonnet-4', 'sonnet-4'] },
-  { id: 'claude-sonnet-4.5', multiplier: 1,    input: 3.00, cachedInput: 0.30, cacheWrite: 3.75, output: 15.00, aliases: ['claude-sonnet-4.5', 'sonnet-4.5'] },
-  { id: 'claude-sonnet-4.6', multiplier: 1,    input: 3.00, cachedInput: 0.30, cacheWrite: 3.75, output: 15.00, aliases: ['claude-sonnet-4.6', 'sonnet-4.6'] },
-  { id: 'claude-opus-4.5',   multiplier: 3,    input: 5.00, cachedInput: 0.50, cacheWrite: 6.25, output: 25.00, aliases: ['claude-opus-4.5', 'opus-4.5'] },
-  { id: 'claude-opus-4.6',   multiplier: 3,    input: 5.00, cachedInput: 0.50, cacheWrite: 6.25, output: 25.00, aliases: ['claude-opus-4.6', 'opus-4.6'] },
-  { id: 'claude-opus-4.6-fast', multiplier: 30, input: 30.00, cachedInput: 3.00, cacheWrite: 37.50, output: 150.00, aliases: ['claude-opus-4.6-fast', 'opus-4.6-fast'] },
-  { id: 'claude-opus-4.7',   multiplier: 15,   input: 5.00, cachedInput: 0.50, cacheWrite: 6.25, output: 25.00, aliases: ['claude-opus-4.7', 'opus-4.7'] },
+  // cacheWrite = 5-min TTL (1.25x input); cacheWrite1h = 1-hour TTL (2x input).
+  { id: 'claude-haiku-4.5',  multiplier: 0.33, freeMultiplier: 1, input: 1.00, cachedInput: 0.10, cacheWrite: 1.25, cacheWrite1h: 2.00, output: 5.00,  aliases: ['claude-haiku-4.5', 'haiku-4.5'] },
+  { id: 'claude-sonnet-4',   multiplier: 1,    input: 3.00, cachedInput: 0.30, cacheWrite: 3.75, cacheWrite1h: 6.00, output: 15.00, aliases: ['claude-sonnet-4', 'sonnet-4'] },
+  { id: 'claude-sonnet-4.5', multiplier: 1,    input: 3.00, cachedInput: 0.30, cacheWrite: 3.75, cacheWrite1h: 6.00, output: 15.00, aliases: ['claude-sonnet-4.5', 'sonnet-4.5'] },
+  { id: 'claude-sonnet-4.6', multiplier: 1,    input: 3.00, cachedInput: 0.30, cacheWrite: 3.75, cacheWrite1h: 6.00, output: 15.00, aliases: ['claude-sonnet-4.6', 'sonnet-4.6'] },
+  { id: 'claude-opus-4.5',   multiplier: 3,    input: 5.00, cachedInput: 0.50, cacheWrite: 6.25, cacheWrite1h: 10.00, output: 25.00, aliases: ['claude-opus-4.5', 'opus-4.5'] },
+  { id: 'claude-opus-4.6',   multiplier: 3,    input: 5.00, cachedInput: 0.50, cacheWrite: 6.25, cacheWrite1h: 10.00, output: 25.00, aliases: ['claude-opus-4.6', 'opus-4.6'] },
+  { id: 'claude-opus-4.6-fast', multiplier: 30, input: 30.00, cachedInput: 3.00, cacheWrite: 37.50, cacheWrite1h: 60.00, output: 150.00, aliases: ['claude-opus-4.6-fast', 'opus-4.6-fast'] },
+  { id: 'claude-opus-4.7',   multiplier: 15,   input: 5.00, cachedInput: 0.50, cacheWrite: 6.25, cacheWrite1h: 10.00, output: 25.00, aliases: ['claude-opus-4.7', 'opus-4.7'] },
+  { id: 'claude-opus-4.8',   multiplier: 15,   input: 5.00, cachedInput: 0.50, cacheWrite: 6.25, cacheWrite1h: 10.00, output: 25.00, aliases: ['claude-opus-4.8', 'opus-4.8'] },
 
   // ---- OpenAI ----
   // GPT-4.1 / GPT-4o / GPT-5 mini are "included" models: 0 on paid plans, 1 on Free.
@@ -115,27 +118,35 @@ const ALIAS_INDEX: { alias: string; entry: ModelEntry }[] = MODEL_TABLE
 const DEFAULT_ENTRY: ModelEntry = {
   id: 'unknown',
   multiplier: 1,
-  input: 3.00, cachedInput: 0.30, cacheWrite: 3.75, output: 15.00,
+  input: 3.00, cachedInput: 0.30, cacheWrite: 3.75, cacheWrite1h: 6.00, output: 15.00,
   aliases: [],
 };
 
 function normalizeModelName(model: string): string {
-  return model
-    .toLowerCase()
-    .replace(/^(anthropic\/|openai\/|google\/|xai\/|github\/)/, '')
-    .replace(/_/g, '-')
-    .trim();
+  let m = model.toLowerCase().trim();
+  // Strip Bedrock/Vertex region + vendor prefixes (e.g. us.anthropic.claude-opus-4-8).
+  m = m.replace(/^(us|eu|apac)\./, '');
+  m = m.replace(/^(anthropic\/|openai\/|google\/|xai\/|github\/|anthropic\.|google\.)/, '');
+  // Strip the long-context marker (claude-opus-4-8[1m], ...:1m).
+  m = m.replace(/\[1m\]$/, '').replace(/:1m$/, '');
+  // Strip a trailing dated snapshot (claude-opus-4-8-20260115 or -2026-01-15).
+  m = m.replace(/-20\d{6}$/, '').replace(/-20\d{2}-\d{2}-\d{2}$/, '');
+  m = m.replace(/_/g, '-');
+  // Canonicalize the version separator so dash-form ids (claude-opus-4-8) match
+  // the dot-form table aliases (claude-opus-4.8). Only digit-dash-digit folds,
+  // so model-name dashes (claude-opus, grok-code-fast-1) are untouched.
+  m = m.replace(/(\d)-(\d)/g, '$1.$2');
+  return m.trim();
 }
 
 export function resolveModel(model: string | undefined | null): { entry: ModelEntry; resolved: boolean } {
   if (!model) { return { entry: DEFAULT_ENTRY, resolved: false }; }
   const norm = normalizeModelName(model);
+  // ALIAS_INDEX is sorted longest-alias-first, so the first substring hit is the
+  // most specific match — a base alias (e.g. "sonnet-4") can never shadow a variant
+  // (e.g. "sonnet-4.5"/"opus-4.6-fast") because the longer alias is tested first.
   for (const { alias, entry } of ALIAS_INDEX) {
-    if (norm === alias || norm.startsWith(alias + '-') || norm.endsWith('-' + alias) || norm.includes(alias)) {
-      // Re-validate: alias must appear as a whole token to avoid e.g. "sonnet-4" matching "sonnet-4.5".
-      // We rely on longest-first ordering: if norm contains the longest alias, use it.
-      if (norm.includes(alias)) { return { entry, resolved: true }; }
-    }
+    if (norm.includes(alias)) { return { entry, resolved: true }; }
   }
   return { entry: DEFAULT_ENTRY, resolved: false };
 }
@@ -143,7 +154,8 @@ export function resolveModel(model: string | undefined | null): { entry: ModelEn
 export interface ModelPricing {
   input: number;
   cachedInput: number;
-  cacheWrite: number;
+  cacheWrite: number;      // 5-minute-TTL cache-write rate
+  cacheWrite1h: number;    // 1-hour-TTL cache-write rate (Anthropic = 2x input)
   output: number;
   modelId: string;
   modelResolved: boolean;
@@ -152,10 +164,14 @@ export interface ModelPricing {
 
 export function getPricing(model: string): ModelPricing {
   const { entry, resolved } = resolveModel(model);
+  const cacheWrite = entry.cacheWrite ?? entry.input;
   return {
     input: entry.input,
     cachedInput: entry.cachedInput,
-    cacheWrite: entry.cacheWrite ?? entry.input,
+    cacheWrite,
+    // Fall back to the 5m rate (no extra 1h surcharge) when a model has no explicit
+    // 1h rate. This only matters when cacheWrite1hTokens > 0, which today is Claude-only.
+    cacheWrite1h: entry.cacheWrite1h ?? cacheWrite,
     output: entry.output,
     modelId: entry.id,
     modelResolved: resolved,
@@ -174,6 +190,7 @@ export interface TokenUsage {
   outputTokens: number;
   cachedInputTokens?: number;   // tokens served from cache (cheaper rate)
   cacheWriteTokens?: number;    // tokens written to cache (Anthropic; usually surcharged)
+  cacheWrite1hTokens?: number;  // subset of cacheWriteTokens written with 1-hour TTL (priced at 2x input)
   reasoningTokens?: number;     // reasoning/thinking tokens (billed at output rate)
   cacheWriteTokensSource?: string;
 }
@@ -193,6 +210,7 @@ export interface RequestCostBreakdown {
     input: number;
     cachedInput: number;
     cacheWrite: number;
+    cacheWrite1h: number;
     output: number;
   };
   costs: {
@@ -226,11 +244,17 @@ export function computeCostBreakdown(model: string, usage: TokenUsage): RequestC
   if ((usage.cacheWriteTokens ?? 0) < 0) { auditFlags.push('cache_write_tokens_negative'); }
   const cachedIn = Math.max(0, usage.cachedInputTokens ?? 0);
   const cacheWrite = Math.max(0, usage.cacheWriteTokens ?? 0);
+  // Split cache-write into 1-hour and 5-minute TTL buckets. The 1h subset is priced
+  // at 2x input (cacheWrite1h); the remainder at the 5m rate (cacheWrite). The full
+  // cacheWrite total is still subtracted from input for uncachedIn — only the RATE
+  // differs by TTL, not the bucket boundary. cacheWrite1hTokens is 0 for Copilot rows.
+  const cacheWrite1h = Math.min(cacheWrite, Math.max(0, usage.cacheWrite1hTokens ?? 0));
+  const cacheWrite5m = cacheWrite - cacheWrite1h;
   const uncachedIn = Math.max(0, usage.inputTokens - cachedIn - cacheWrite);
   const out = Math.max(0, usage.outputTokens);
   const inputUSD = (uncachedIn / 1_000_000) * p.input;
   const cachedInputUSD = (cachedIn / 1_000_000) * p.cachedInput;
-  const cacheWriteUSD = (cacheWrite / 1_000_000) * p.cacheWrite;
+  const cacheWriteUSD = (cacheWrite5m / 1_000_000) * p.cacheWrite + (cacheWrite1h / 1_000_000) * p.cacheWrite1h;
   const outputUSD = (out / 1_000_000) * p.output;
   if (!p.modelResolved) { auditFlags.push('model_unresolved_pricing_fallback'); }
   if (cachedIn + cacheWrite > usage.inputTokens) { auditFlags.push('token_buckets_exceed_input'); }
@@ -249,7 +273,7 @@ export function computeCostBreakdown(model: string, usage: TokenUsage): RequestC
     cacheWriteTokens: cacheWrite,
     uncachedInputTokens: uncachedIn,
     outputTokens: out,
-    rates: { input: p.input, cachedInput: p.cachedInput, cacheWrite: p.cacheWrite, output: p.output },
+    rates: { input: p.input, cachedInput: p.cachedInput, cacheWrite: p.cacheWrite, cacheWrite1h: p.cacheWrite1h, output: p.output },
     costs: {
       inputUSD,
       cachedInputUSD,
@@ -298,6 +322,70 @@ export interface BillingStatus {
   notes: string[];
 }
 
+// =============================================================================
+// Claude billing — USD + token totals (no credits / premium-requests / multipliers).
+// The shared per-token engine (computeCostUSD over MODEL_TABLE, which holds Anthropic
+// list prices) is reused; Claude cache tokens are measured so no estimation is needed.
+// CLAUDE-PROVIDER-PLAN.md §7 / §15 #3.
+// =============================================================================
+
+export interface ClaudeBillingView {
+  provider: 'claude';
+  periodLabel: string;
+  isHistoricalPeriod: boolean;
+  costBasis: ClaudeCostBasis;
+  costUSD: number;
+  tokenTotals: { input: number; output: number; cachedInput: number; cacheWrite: number };
+  perModel: { model: string; inputTokens: number; outputTokens: number; costUSD: number }[];
+  notes: string[];
+}
+
+export function computeClaudeBilling(
+  db: TrackerDatabase,
+  period: { start: number; end: number },
+  periodLabel: string,
+  costBasis: ClaudeCostBasis,
+  isHistoricalPeriod: boolean,
+): ClaudeBillingView {
+  const requests = db.getLLMRequestsInPeriod(period.start, period.end, 'claude');
+  let costUSD = 0;
+  const tokenTotals = { input: 0, output: 0, cachedInput: 0, cacheWrite: 0 };
+  const perModelMap = new Map<string, { model: string; inputTokens: number; outputTokens: number; costUSD: number }>();
+  for (const r of requests) {
+    const c = computeCostUSD(r.model, {
+      inputTokens: r.inputTokens,
+      outputTokens: r.outputTokens,
+      cachedInputTokens: r.cachedInputTokens,
+      cacheWriteTokens: r.cacheWriteTokens,
+      cacheWrite1hTokens: r.cacheWrite1hTokens,
+      cacheWriteTokensSource: r.cacheWriteTokensSource,
+    });
+    costUSD += c;
+    tokenTotals.input += r.inputTokens;
+    tokenTotals.output += r.outputTokens;
+    tokenTotals.cachedInput += r.cachedInputTokens || 0;
+    tokenTotals.cacheWrite += r.cacheWriteTokens || 0;
+    const e = perModelMap.get(r.model) || { model: r.model, inputTokens: 0, outputTokens: 0, costUSD: 0 };
+    e.inputTokens += r.inputTokens;
+    e.outputTokens += r.outputTokens;
+    e.costUSD += c;
+    perModelMap.set(r.model, e);
+  }
+  const notes = costBasis === 'subscription'
+    ? ['USD is API-equivalent at Anthropic list prices — on a Claude Pro/Max subscription this is included in your plan, not extra spend.']
+    : ['USD is computed at Anthropic API list prices (input incl. cached prefix).'];
+  return {
+    provider: 'claude',
+    periodLabel,
+    isHistoricalPeriod,
+    costBasis,
+    costUSD,
+    tokenTotals,
+    perModel: Array.from(perModelMap.values()).sort((a, b) => b.costUSD - a.costUSD),
+    notes,
+  };
+}
+
 export function getBillingPeriodBounds(now = Date.now()): { start: number; end: number; daysRemaining: number } {
   const d = new Date(now);
   const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
@@ -332,7 +420,10 @@ export function computeBillingStatus(
   }
 
   // Per-message premium-request cost using the ACTUAL model that answered each prompt.
-  const userPromptModels = db.getUserPromptModelsInPeriod(start, end);
+  // COPILOT-ONLY: premium requests / AI credits are a GitHub billing concept. Passing
+  // 'copilot' is load-bearing (CLAUDE-PROVIDER-PLAN.md §15 #1) — without it, Claude rows
+  // inflate the Copilot premium-request and AI-credit totals the moment they coexist.
+  const userPromptModels = db.getUserPromptModelsInPeriod(start, end, 'copilot');
   const currentBreakdown = new Map<string, { requests: number; multipliedCost: number }>();
   let totalPremiumRequests = 0;
   for (const { model } of userPromptModels) {
@@ -347,7 +438,7 @@ export function computeBillingStatus(
   // Token-based cost across ALL llm requests in period (incl. tool/subagent calls).
   // Hybrid: use measured cache values when present, estimate otherwise.
   // Prefer API-reported direct credits when available.
-  const rawRequests = db.getLLMRequestsInPeriod(start, end);
+  const rawRequests = db.getLLMRequestsInPeriod(start, end, 'copilot');
   const { requests, anyEstimated, anyMeasured } = estimateSessionCaching(rawRequests);
   const newBreakdown = new Map<string, { inputTokens: number; outputTokens: number; credits: number }>();
   let totalAiCredits = 0;

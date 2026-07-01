@@ -48,6 +48,7 @@ export function computeSessionStats(parsed: ParsedSession): SessionStats {
       outputTokens: r.outputTokens,
       cachedInputTokens: r.cachedInputTokens,
       cacheWriteTokens: r.cacheWriteTokens,
+      cacheWrite1hTokens: r.cacheWrite1hTokens,
       reasoningTokens: r.reasoningTokens,
       cacheWriteTokensSource: r.cacheWriteTokensSource,
     });
@@ -105,6 +106,7 @@ export function computeSessionStats(parsed: ParsedSession): SessionStats {
 
   return {
     sessionId: session.id,
+    provider: session.provider,
     totalInputTokens,
     totalOutputTokens,
     totalTokens,

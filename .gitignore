@@ -9,5 +9,15 @@ out/
 # Scratch/unused files
 scratch/
 
-# Test files
+# Test files (never tracked)
 test/
+**/*.test.ts
+**/*.test.js
+**/*.spec.ts
+**/*.spec.js
+
+# Planning / working docs (not shipped, not tracked)
+CLAUDE-PROVIDER-PLAN.md
+
+# Stray VS Code / Chromium crash log
+debug.log

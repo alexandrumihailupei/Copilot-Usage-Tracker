@@ -141,6 +141,17 @@ export interface ModelInfo {
 export type TokenDataSource = 'otel' | 'jsonl' | 'prompt_export' | 'estimated' | 'missing' | 'unknown';
 export type CostAuditState = 'measured' | 'estimated' | 'mixed' | 'incomplete';
 
+/**
+ * Telemetry provider a session/record originated from. Orthogonal to
+ * `dataSource` (which is ingest fidelity: otel|jsonl|hybrid). Writers default
+ * a missing value to 'copilot' so existing rows and Copilot code paths are
+ * unaffected. NOTE: model id is NOT a reliable provider discriminator —
+ * Copilot Chat can itself run Claude models — so all provider-sensitive
+ * logic (pricing table, billing, queries) must key off this field, never
+ * off the model string. See CLAUDE-PROVIDER-PLAN.md §15.
+ */
+export type ProviderId = 'copilot' | 'claude';
+
 export interface SessionInfo {
   id: string;
   workspaceId: string;
@@ -149,6 +160,8 @@ export interface SessionInfo {
   endTime: number;
   copilotVersion: string;
   vscodeVersion: string;
+  // Telemetry provider (defaults to 'copilot' when absent).
+  provider?: ProviderId;
   // OTel-sourced fields
   repository?: string;
   branch?: string;
@@ -160,6 +173,9 @@ export interface SessionInfo {
 
 export interface LLMRequestRecord {
   sessionId: string;
+  // Denormalized provider tag (defaults to 'copilot') so the hot timestamp-scan
+  // aggregates can filter on lr.provider without a sessions JOIN.
+  provider?: ProviderId;
   spanId: string;
   parentSpanId?: string;
   timestamp: number;
@@ -169,6 +185,10 @@ export interface LLMRequestRecord {
   outputTokens: number;
   cachedInputTokens: number;
   cacheWriteTokens: number;
+  /** Subset of cacheWriteTokens written with a 1-hour TTL (Anthropic), billed at
+   *  2x base input vs the 5-minute rate (1.25x). 0/undefined for providers/models
+   *  that don't report the ephemeral_1h breakdown (e.g. all Copilot rows). */
+  cacheWrite1hTokens?: number;
   totalTokens: number;
   ttft: number;
   maxTokens: number;
@@ -194,6 +214,10 @@ export interface LLMRequestRecord {
   // When present, this supersedes the token-based cost formula for this request.
   directCredits?: number;
   directCreditsSource?: TokenDataSource;
+  // Rich-detail capture (capped): the assistant's generated output text and its
+  // thinking/reasoning text for this request/turn.
+  outputText?: string;
+  reasoningText?: string;
 }
 
 export interface UserMessageRecord {
@@ -202,6 +226,8 @@ export interface UserMessageRecord {
   timestamp: number;
   contentLength: number;
   contentPreview: string;
+  /** Full message text (capped). Captured when rich-detail capture is on. */
+  contentFull?: string;
 }
 
 export interface ToolCallRecord {
@@ -216,10 +242,16 @@ export interface ToolCallRecord {
   // OTel-sourced fields
   toolType?: string;
   toolCallId?: string;
+  // Rich-detail capture (capped): the tool input (command/script/file edit),
+  // its output/result, and any error text.
+  args?: string;
+  result?: string;
+  errorText?: string;
 }
 
 export interface SessionStats {
   sessionId: string;
+  provider?: ProviderId;
   totalInputTokens: number;
   totalOutputTokens: number;
   totalTokens: number;
@@ -266,6 +298,7 @@ export interface ParsedSession {
 
 export interface DiscoveredSession {
   sessionId: string;
+  provider?: ProviderId;
   dirPath: string;
   workspaceId: string;
   mainJsonlPath: string;
@@ -315,6 +348,7 @@ export type WebviewMessage =
   | { type: 'requestSessionDetail'; sessionId: string }
   | { type: 'requestBilling'; periodStart: number; periodEnd: number; periodLabel: string }
   | { type: 'requestTrends'; period: 'daily' | 'weekly' | 'monthly' }
+  | { type: 'setProvider'; provider: ProviderId }
   | { type: 'refresh' };
 
 export type ExtensionMessage =
@@ -322,15 +356,31 @@ export type ExtensionMessage =
   | { type: 'sessions'; data: SessionListData }
   | { type: 'sessionDetail'; data: SessionDetailData }
   | { type: 'billingStatus'; data: NonNullable<OverviewData['billing']> & { modelStats?: ModelStats[]; workflow?: OverviewData['workflow'] } }
+  | { type: 'claudeBilling'; data: ClaudeBillingData & { modelStats?: ModelStats[]; workflow?: OverviewData['workflow'] } }
   | { type: 'trends'; data: TrendData }
   | { type: 'error'; message: string };
 
+/** Provider-specific billing view for Claude — USD + token totals, no credits/premium-requests. */
+export interface ClaudeBillingData {
+  provider: 'claude';
+  periodLabel: string;
+  isHistoricalPeriod: boolean;
+  costBasis: 'api' | 'subscription';
+  costUSD: number;
+  tokenTotals: { input: number; output: number; cachedInput: number; cacheWrite: number };
+  perModel: { model: string; inputTokens: number; outputTokens: number; costUSD: number }[];
+  notes: string[];
+}
+
 export interface OverviewData {
+  provider: ProviderId;
   aggregate: AggregateStats;
   dailyStats: DailyStats[];
   modelStats: ModelStats[];
   topSessions: (SessionStats & { startTime: number })[];
   availableMonths: { year: number; month: number; label: string; start: number; end: number }[];
+  /** Claude-provider billing view (present only when provider==='claude'). */
+  claudeBilling?: ClaudeBillingData;
   billing?: {
     periodLabel: string;
     isHistoricalPeriod: boolean;

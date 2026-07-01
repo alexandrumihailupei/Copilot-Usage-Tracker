@@ -4,6 +4,7 @@ import {
   LLMRequestEvent,
   UserMessageEvent,
   ToolCallEvent,
+  AgentResponseEvent,
   SubagentEvent,
   TurnEvent,
   ParsedSession,
@@ -18,6 +19,11 @@ import { parseJsonlFile, parseJsonlFileSync } from './logParser';
 import { parseModelsJson, getBillingMultiplier } from './modelResolver';
 
 const PREVIEW_LENGTH = 200;
+const MAX_DETAIL = 16000; // per-field cap so the DB stays bounded
+
+function cap(s: string): string {
+  return s.length > MAX_DETAIL ? s.slice(0, MAX_DETAIL) + `\n…[truncated ${s.length - MAX_DETAIL} chars]` : s;
+}
 
 /**
  * Build a fully parsed session from a discovered session on disk.
@@ -115,6 +121,7 @@ function collectEvents(
   let turnCount = 0;
   const subagentNames = new Set<string>();
   let lastTs = 0;
+  let lastLlm: LLMRequestRecord | undefined;   // for attaching agent_response output
 
   for (const event of events) {
     if (event.ts > lastTs) { lastTs = event.ts; }
@@ -193,6 +200,7 @@ function collectEvents(
           directCredits,
           directCreditsSource: directCredits !== undefined ? 'jsonl' : undefined,
         });
+        lastLlm = llmRequests[llmRequests.length - 1];
         break;
       }
 
@@ -205,6 +213,7 @@ function collectEvents(
           timestamp: e.ts,
           contentLength: content.length,
           contentPreview: content.substring(0, PREVIEW_LENGTH),
+          contentFull: content ? cap(content) : undefined,
         });
         break;
       }
@@ -220,7 +229,20 @@ function collectEvents(
           toolName: e.name,
           status: e.status,
           isSubagent,
+          args: e.attrs.args ? cap(String(e.attrs.args)) : undefined,
+          result: e.attrs.result ? cap(String(e.attrs.result)) : undefined,
+          errorText: e.attrs.error ? cap(String(e.attrs.error)) : undefined,
         });
+        break;
+      }
+
+      case 'agent_response': {
+        // Attach the assistant's generated text/reasoning to the most recent LLM request.
+        const e = event as AgentResponseEvent;
+        if (lastLlm) {
+          if (e.attrs.response) { lastLlm.outputText = cap(String(e.attrs.response)); }
+          if (e.attrs.reasoning) { lastLlm.reasoningText = cap(String(e.attrs.reasoning)); }
+        }
         break;
       }
 
