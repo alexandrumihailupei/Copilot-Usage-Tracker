@@ -5,6 +5,7 @@ import { syncAll } from './db/sync';
 import { SessionTreeProvider, QuickStatsTreeProvider } from './views/treeView/statsTreeProvider';
 import { DashboardPanel } from './views/webview/dashboardPanel';
 import { ProviderId } from './core/types';
+import { detectCopilotEditors } from './core/logDiscovery';
 
 let db: TrackerDatabase | undefined;
 
@@ -97,6 +98,57 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           vscode.window.showInformationMessage(`Added log directory: ${newDir}`);
         }
       }
+    }),
+
+    vscode.commands.registerCommand('copilotUsageTracker.selectIdeSources', async () => {
+      if (!db) { return; }
+      const detected = detectCopilotEditors();
+      if (detected.length === 0) {
+        vscode.window.showInformationMessage(
+          'AI Usage: no GitHub Copilot debug-logs found in any IDE. Enable file logging (VS Code: "github.copilot.chat.agentDebugLog.fileLogging.enabled"; JetBrains: Tools › GitHub Copilot › Chat › Enable Agent debug File Logging), run an agent chat, then retry.'
+        );
+        return;
+      }
+      const cfg = vscode.workspace.getConfiguration('copilotUsageTracker');
+      const enabled = cfg.get<string[]>('enabledEditors', []);
+      type IdeItem = vscode.QuickPickItem & { editor: string };
+      const items: IdeItem[] = detected.map(d => ({
+        label: d.editor === 'JetBrains' ? 'JetBrains IDEs (experimental)' : d.editor,
+        description: `${d.sessionCount} Copilot session${d.sessionCount === 1 ? '' : 's'}`,
+        editor: d.editor,
+        picked: enabled.length === 0 ? true : enabled.includes(d.editor),
+      }));
+      const chosen = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        title: 'Select IDEs to include (GitHub Copilot only)',
+        placeHolder: 'Only checked IDEs are summed · selecting all = auto-include future editors',
+      });
+      if (!chosen) { return; }                                  // cancelled: no change
+      const selected = chosen.map(c => c.editor);
+      if (selected.length === 0) {
+        vscode.window.showWarningMessage('AI Usage: no IDE selected — selection left unchanged.');
+        return;
+      }
+      // Store [] when EVERY detected editor is selected ("all"; also auto-includes
+      // future installs); otherwise persist the explicit subset.
+      const toStore = selected.length === detected.length ? [] : selected;
+      await cfg.update('enabledEditors', toStore, vscode.ConfigurationTarget.Global);
+
+      // Re-sum: clear ONLY Copilot data (Claude untouched), then resync with the
+      // new editor filter so totals reflect exactly the selection.
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Rebuilding GitHub Copilot usage from selected IDEs...', cancellable: false },
+        async (progress) => {
+          db!.clearProvider('copilot');
+          await syncAll(db!, progress, wasmPath);
+        }
+      );
+      sessionTree.refresh();
+      quickStatsTree.refresh();
+      DashboardPanel.currentPanel?.refresh();
+      vscode.window.showInformationMessage(
+        `AI Usage: now summing ${selected.length} IDE source${selected.length === 1 ? '' : 's'}: ${selected.join(', ')}.`
+      );
     }),
 
     vscode.commands.registerCommand('copilotUsageTracker.clearCache', async () => {

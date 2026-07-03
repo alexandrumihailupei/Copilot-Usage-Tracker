@@ -43,6 +43,12 @@
         "icon": "$(add)"
       },
       {
+        "command": "copilotUsageTracker.selectIdeSources",
+        "title": "Select IDE Sources (GitHub Copilot)",
+        "category": "AI Usage",
+        "icon": "$(device-desktop)"
+      },
+      {
         "command": "copilotUsageTracker.clearCache",
         "title": "Clear Cache",
         "category": "AI Usage"
@@ -117,6 +123,11 @@
           "group": "navigation@3"
         },
         {
+          "command": "copilotUsageTracker.selectIdeSources",
+          "when": "view == copilotUsageTracker.sessions",
+          "group": "navigation@4"
+        },
+        {
           "command": "copilotUsageTracker.toggleProvider",
           "when": "view == copilotUsageTracker.quickStats",
           "group": "navigation@1"
@@ -143,7 +154,15 @@
         "copilotUsageTracker.autoScanWorkspaceStorage": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically discover logs in VS Code workspaceStorage folders."
+          "description": "Auto-discover logs across all VS Code-family editors (Code, Insiders, VSCodium, Cursor, Windsurf, ...) plus a best-effort JetBrains probe."
+        },
+        "copilotUsageTracker.enabledEditors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "IDE editor keys to include when auto-scanning GitHub Copilot logs (e.g. \"Code\", \"Cursor\", \"JetBrains\"). Empty = all detected. Manage via the \"Select IDE Sources\" button."
         },
         "copilotUsageTracker.parseSubagentLogs": {
           "type": "boolean",

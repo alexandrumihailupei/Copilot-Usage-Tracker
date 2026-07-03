@@ -6,6 +6,8 @@ export type ClaudeCostBasis = 'api' | 'subscription';
 export interface ExtensionConfig {
   logDirectories: string[];
   autoScanWorkspaceStorage: boolean;
+  /** Editor keys to include in the Copilot auto-scan (empty = all detected). */
+  enabledEditors: string[];
   parseSubagentLogs: boolean;
   defaultGroupBy: 'date' | 'workspace' | 'model';
   plan: CopilotPlan;
@@ -20,6 +22,7 @@ export function getConfig(): ExtensionConfig {
   return {
     logDirectories: cfg.get<string[]>('logDirectories', []),
     autoScanWorkspaceStorage: cfg.get<boolean>('autoScanWorkspaceStorage', true),
+    enabledEditors: cfg.get<string[]>('enabledEditors', []),
     parseSubagentLogs: cfg.get<boolean>('parseSubagentLogs', true),
     defaultGroupBy: cfg.get<'date' | 'workspace' | 'model'>('defaultGroupBy', 'date'),
     plan: cfg.get<CopilotPlan>('plan', 'business'),

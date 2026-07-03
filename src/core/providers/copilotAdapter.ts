@@ -15,7 +15,7 @@ export const copilotAdapter: ProviderAdapter = {
   displayName: 'GitHub Copilot',
 
   discover(config: ExtensionConfig): DiscoveredSession[] {
-    return discoverSessions(config.logDirectories, config.autoScanWorkspaceStorage)
+    return discoverSessions(config.logDirectories, config.autoScanWorkspaceStorage, config.enabledEditors)
       .map(d => ({ ...d, provider: 'copilot' as const }));
   },
 
